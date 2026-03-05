@@ -748,6 +748,8 @@ step_ask_domain() {
             print_fail "Domain cannot be empty. Please try again."
         elif [[ ! "$DOMAIN" =~ \. ]]; then
             print_fail "Invalid domain (must contain a dot). Please try again."
+        elif [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+            print_fail "Invalid domain (use only letters, numbers, dots, hyphens). Please try again."
         else
             break
         fi
@@ -1642,6 +1644,8 @@ do_add_domain() {
             print_fail "Domain cannot be empty. Please try again."
         elif [[ ! "$DOMAIN" =~ \. ]]; then
             print_fail "Invalid domain (must contain a dot). Please try again."
+        elif [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+            print_fail "Invalid domain (use only letters, numbers, dots, hyphens). Please try again."
         elif echo "$existing_domains" | grep -qx "$DOMAIN"; then
             print_fail "Domain '${DOMAIN}' is already in use by an existing tunnel. Please enter a different domain."
         else
