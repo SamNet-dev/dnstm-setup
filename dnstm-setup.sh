@@ -1,3 +1,4 @@
+cat dnstm-setup.sh 
 #!/usr/bin/env bash
 #
 # dnstm-setup v1.0
@@ -12,6 +13,10 @@ set -euo pipefail
 
 VERSION="1.0"
 TOTAL_STEPS=12
+
+DEFAULT_DNSTT_MTU="1232"
+DNSTT_MTU="$DEFAULT_DNSTT_MTU"
+ADD_DOMAIN_MODE=false
 
 # ─── Colors & Formatting ───────────────────────────────────────────────────────
 
@@ -463,7 +468,9 @@ show_help() {
     echo ""
     echo -e "${BOLD}USAGE${NC}"
     echo "  sudo bash dnstm-setup.sh              Run interactive setup"
+    echo "  sudo bash dnstm-setup.sh --mtu 1200   Run setup with custom DNSTT MTU"
     echo "  sudo bash dnstm-setup.sh --add-domain  Add a backup domain to existing setup"
+    echo "  sudo bash dnstm-setup.sh --add-domain --mtu 1200  Add domain with custom DNSTT MTU"
     echo "  sudo bash dnstm-setup.sh --uninstall   Remove everything"
     echo "  bash dnstm-setup.sh --help             Show this help"
     echo "  bash dnstm-setup.sh --about            Show project info"
@@ -473,6 +480,7 @@ show_help() {
     echo "  --about        Show project information and credits"
     echo "  --add-domain   Add another domain to an existing server (backup/fallback)"
     echo "  --uninstall    Remove all installed components"
+    echo "  --mtu VALUE    DNSTT MTU to use for DNSTT tunnels only (default: ${DEFAULT_DNSTT_MTU})"
     echo ""
     echo -e "${BOLD}WHAT THIS SCRIPT SETS UP${NC}"
     echo "  1. Slipstream + SOCKS tunnel  (fastest, ~63 KB/s)"
@@ -632,34 +640,72 @@ do_uninstall() {
     echo ""
 }
 
+# ─── MTU Validation ───────────────────────────────────────────────────────────
+
+validate_mtu() {
+    local mtu="$1"
+
+    if [[ -z "$mtu" ]]; then
+        return 1
+    fi
+
+    if [[ ! "$mtu" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+
+    # Safe practical range for DNSTT tuning
+    if (( mtu < 512 || mtu > 1500 )); then
+        return 1
+    fi
+
+    return 0
+}
+
+normalize_mtu_or_exit() {
+    local mtu="$1"
+    if ! validate_mtu "$mtu"; then
+        echo "Invalid MTU: $mtu"
+        echo "Use an integer between 512 and 1500."
+        exit 1
+    fi
+}
+
 # ─── Parse Arguments ────────────────────────────────────────────────────────────
 
-case "${1:-}" in
-    --help|-h)
-        show_help
-        exit 0
-        ;;
-    --about)
-        show_about
-        exit 0
-        ;;
-    --uninstall)
-        do_uninstall
-        exit 0
-        ;;
-    --add-domain)
-        ADD_DOMAIN_MODE=true
-        ;;
-    "")
-        # No args, continue with setup
-        ADD_DOMAIN_MODE=false
-        ;;
-    *)
-        echo "Unknown option: $1"
-        echo "Use --help for usage information."
-        exit 1
-        ;;
-esac
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        --about)
+            show_about
+            exit 0
+            ;;
+        --uninstall)
+            do_uninstall
+            exit 0
+            ;;
+        --add-domain)
+            ADD_DOMAIN_MODE=true
+            shift
+            ;;
+        --mtu)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --mtu requires a value"
+                exit 1
+            fi
+            DNSTT_MTU="$2"
+            normalize_mtu_or_exit "$DNSTT_MTU"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information."
+            exit 1
+            ;;
+    esac
+done
 
 # ─── Variables (populated during setup) ─────────────────────────────────────────
 
@@ -1069,7 +1115,7 @@ step_create_tunnels() {
     echo -e "  ${BOLD}Tunnel 2: DNSTT + SOCKS${NC}"
     echo ""
     local dnstt_output
-    dnstt_output=$(dnstm tunnel add --transport dnstt --backend socks --domain "d2.${DOMAIN}" --tag dnstt1 2>&1) || true
+    dnstt_output=$(dnstm tunnel add --transport dnstt --backend socks --domain "d2.${DOMAIN}" --tag dnstt1 --mtu "$DNSTT_MTU" 2>&1) || true
     echo "$dnstt_output"
 
     # Try to extract DNSTT public key
@@ -1107,7 +1153,7 @@ step_create_tunnels() {
     echo -e "  ${DIM}───────────────────────────────────────────────${NC}"
     echo -e "  ${BOLD}Tunnel 4: DNSTT + SSH${NC}"
     echo ""
-    if dnstm tunnel add --transport dnstt --backend ssh --domain "ds2.${DOMAIN}" --tag dnstt-ssh 2>&1; then
+    if dnstm tunnel add --transport dnstt --backend ssh --domain "ds2.${DOMAIN}" --tag dnstt-ssh --mtu "$DNSTT_MTU" 2>&1; then
         print_ok "Created: dnstt-ssh (DNSTT + SSH) on ds2.${DOMAIN}"
         any_created=true
     else
@@ -1532,6 +1578,11 @@ step_summary() {
         echo ""
     fi
 
+    echo -e "  ${BOLD}DNSTT MTU${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+    echo -e "  ${GREEN}${DNSTT_MTU}${NC}"
+    echo ""
+
     if [[ "$SSH_SETUP_DONE" == true ]]; then
         echo -e "  ${BOLD}SSH Tunnel User${NC}"
         echo -e "  ${DIM}────────────────────────────────────────${NC}"
@@ -1710,7 +1761,7 @@ do_add_domain() {
     echo -e "  ${BOLD}Tunnel: DNSTT + SOCKS${NC}"
     echo ""
     local dnstt_output
-    dnstt_output=$(dnstm tunnel add --transport dnstt --backend socks --domain "d2.${DOMAIN}" --tag "$dnstt_tag" 2>&1) || true
+    dnstt_output=$(dnstm tunnel add --transport dnstt --backend socks --domain "d2.${DOMAIN}" --tag "$dnstt_tag" --mtu "$DNSTT_MTU" 2>&1) || true
     echo "$dnstt_output"
 
     DNSTT_PUBKEY=""
@@ -1743,7 +1794,7 @@ do_add_domain() {
     echo -e "  ${DIM}───────────────────────────────────────────────${NC}"
     echo -e "  ${BOLD}Tunnel: DNSTT + SSH${NC}"
     echo ""
-    if dnstm tunnel add --transport dnstt --backend ssh --domain "ds2.${DOMAIN}" --tag "$dnstt_ssh_tag" 2>&1; then
+    if dnstm tunnel add --transport dnstt --backend ssh --domain "ds2.${DOMAIN}" --tag "$dnstt_ssh_tag" --mtu "$DNSTT_MTU" 2>&1; then
         print_ok "Created: ${dnstt_ssh_tag} (DNSTT + SSH) on ds2.${DOMAIN}"
     else
         print_warn "Tunnel ${dnstt_ssh_tag} may already exist or creation failed"
@@ -1826,6 +1877,11 @@ do_add_domain() {
         echo -e "  ${GREEN}${DNSTT_PUBKEY}${NC}"
         echo ""
     fi
+
+    echo -e "  ${BOLD}DNSTT MTU${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+    echo -e "  ${GREEN}${DNSTT_MTU}${NC}"
+    echo ""
 
     echo -e "  ${DIM}To add more domains, run again: sudo bash $0 --add-domain${NC}"
     echo ""
