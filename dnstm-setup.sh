@@ -1543,14 +1543,16 @@ step_verify_microsocks() {
 # ─── STEP 10: SSH User (Optional) ──────────────────────────────────────────────
 
 step_ssh_user() {
-    print_step 10 "SSH Tunnel User (Optional)"
+    print_step 10 "SSH Tunnel User"
 
     print_info "An SSH tunnel user allows clients to connect via Slipstream + SSH or DNSTT + SSH."
     print_info "This user can only create tunnels and has no shell access."
+    print_warn "Without an SSH tunnel user, the SSH tunnels (s2/ds2) will NOT work."
     echo ""
 
-    if ! prompt_yn "Do you want to create an SSH tunnel user?" "y"; then
-        print_info "Skipping SSH user setup"
+    if ! prompt_yn "Create an SSH tunnel user? (required for SSH tunnels to work)" "y"; then
+        print_warn "Skipping SSH user setup — SSH tunnels (s2.${DOMAIN}, ds2.${DOMAIN}) will not work"
+        print_info "You can create one later with: sshtun-user create <username> --insecure-password <pass>"
         return
     fi
 
@@ -1720,6 +1722,24 @@ step_tests() {
     fi
     echo ""
 
+    # Test 6: SSH readiness
+    echo -e "  ${BOLD}Test 6: SSH Tunnel Readiness${NC}"
+    if ss -tlnp 2>/dev/null | grep -E ':22\b' | grep -q "sshd"; then
+        if [[ "$SSH_SETUP_DONE" == true ]]; then
+            print_ok "SSH: PASS (sshd running, tunnel user '${SSH_USER}' created)"
+            pass=$((pass + 1))
+        else
+            print_warn "SSH: sshd running but no tunnel user created — SSH tunnels (s2/ds2) will not work"
+            print_info "Create one with: sshtun-user create <username> --insecure-password <pass>"
+            fail=$((fail + 1))
+        fi
+    else
+        print_warn "SSH: sshd not detected on port 22 — SSH tunnels (s2/ds2) will not work"
+        print_info "Start sshd with: systemctl start sshd"
+        fail=$((fail + 1))
+    fi
+    echo ""
+
     # Summary
     echo -e "  ${DIM}───────────────────────────────────────────────${NC}"
     if [[ $fail -eq 0 ]]; then
@@ -1778,6 +1798,12 @@ step_summary() {
         echo -e "  Username:  ${GREEN}${SSH_USER}${NC}"
         echo -e "  Password:  ${GREEN}${SSH_PASS}${NC}"
         echo -e "  Port:      ${GREEN}22${NC}"
+        echo ""
+    else
+        echo -e "  ${BOLD}SSH Tunnel User${NC}"
+        echo -e "  ${DIM}────────────────────────────────────────${NC}"
+        echo -e "  ${YELLOW}⚠ Not configured — SSH tunnels (s2/ds2) will not work${NC}"
+        echo -e "  Create one with: ${BOLD}sshtun-user create <username> --insecure-password <pass>${NC}"
         echo ""
     fi
 
