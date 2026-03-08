@@ -1875,7 +1875,7 @@ step_summary() {
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
     local slipnet_url
     # Slipstream + SOCKS
-    slipnet_url=$(generate_slipnet_url "slipstream" "t2" "" "" "")
+    slipnet_url=$(generate_slipnet_url "ss" "t2" "" "" "")
     echo -e "  ${GREEN}slip1:${NC}    ${slipnet_url}"
     # DNSTT + SOCKS
     if [[ -n "$DNSTT_PUBKEY" ]]; then
@@ -1884,10 +1884,10 @@ step_summary() {
     fi
     # SSH tunnels
     if [[ "$SSH_SETUP_DONE" == true && -n "$SSH_USER" && -n "$SSH_PASS" ]]; then
-        slipnet_url=$(generate_slipnet_url "slipstream" "s2" "" "$SSH_USER" "$SSH_PASS")
+        slipnet_url=$(generate_slipnet_url "slipstream_ssh" "s2" "" "$SSH_USER" "$SSH_PASS")
         echo -e "  ${GREEN}slip-ssh:${NC} ${slipnet_url}"
         if [[ -n "$DNSTT_PUBKEY" ]]; then
-            slipnet_url=$(generate_slipnet_url "dnstt" "ds2" "$DNSTT_PUBKEY" "$SSH_USER" "$SSH_PASS")
+            slipnet_url=$(generate_slipnet_url "dnstt_ssh" "ds2" "$DNSTT_PUBKEY" "$SSH_USER" "$SSH_PASS")
             echo -e "  ${GREEN}dnstt-ssh:${NC} ${slipnet_url}"
         fi
     fi
@@ -2234,17 +2234,17 @@ do_add_domain() {
     echo -e "  ${BOLD}Share URLs — slipnet:// (for SlipNet app)${NC}"
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
     local slipnet_url
-    slipnet_url=$(generate_slipnet_url "slipstream" "t2" "" "" "")
+    slipnet_url=$(generate_slipnet_url "ss" "t2" "" "" "")
     echo -e "  ${GREEN}${slip_tag}:${NC}    ${slipnet_url}"
     if [[ -n "$DNSTT_PUBKEY" ]]; then
         slipnet_url=$(generate_slipnet_url "dnstt" "d2" "$DNSTT_PUBKEY" "" "")
         echo -e "  ${GREEN}${dnstt_tag}:${NC}   ${slipnet_url}"
     fi
     if [[ -n "$SSH_USER" && -n "$SSH_PASS" ]]; then
-        slipnet_url=$(generate_slipnet_url "slipstream" "s2" "" "$SSH_USER" "$SSH_PASS")
+        slipnet_url=$(generate_slipnet_url "slipstream_ssh" "s2" "" "$SSH_USER" "$SSH_PASS")
         echo -e "  ${GREEN}${slip_ssh_tag}:${NC} ${slipnet_url}"
         if [[ -n "$DNSTT_PUBKEY" ]]; then
-            slipnet_url=$(generate_slipnet_url "dnstt" "ds2" "$DNSTT_PUBKEY" "$SSH_USER" "$SSH_PASS")
+            slipnet_url=$(generate_slipnet_url "dnstt_ssh" "ds2" "$DNSTT_PUBKEY" "$SSH_USER" "$SSH_PASS")
             echo -e "  ${GREEN}${dnstt_ssh_tag}:${NC} ${slipnet_url}"
         fi
     fi
