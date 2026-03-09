@@ -906,6 +906,34 @@ do_uninstall() {
     echo ""
 }
 
+# ─── Architecture Detection ────────────────────────────────────────────────────
+
+detect_architecture() {
+    # Detect system architecture using uname and map it to binary suffix
+    # Supports: 386, amd64, arm64, armv7
+    local machine_arch
+    machine_arch=$(uname -m)
+
+    case "$machine_arch" in
+        x86_64|amd64)
+            echo "amd64"
+            ;;
+        i386|i686)
+            echo "386"
+            ;;
+        aarch64|arm64)
+            echo "arm64"
+            ;;
+        armv7l|armv7)
+            echo "armv7"
+            ;;
+        *)
+            print_warn "Unsupported architecture: $machine_arch (defaulting to amd64)"
+            echo "amd64"
+            ;;
+    esac
+}
+
 # ─── User Management TUI ──────────────────────────────────────────────────────
 
 do_manage_users() {
@@ -921,11 +949,13 @@ do_manage_users() {
     # Install sshtun-user if not present
     if ! command -v sshtun-user &>/dev/null; then
         print_info "sshtun-user not found. Installing..."
-        if curl -fsSL -o /usr/local/bin/sshtun-user https://github.com/net2share/sshtun-user/releases/latest/download/sshtun-user-linux-amd64; then
+        local arch
+        arch=$(detect_architecture)
+        if curl -fsSL -o /usr/local/bin/sshtun-user "https://github.com/net2share/sshtun-user/releases/latest/download/sshtun-user-linux-${arch}"; then
             chmod +x /usr/local/bin/sshtun-user
-            print_ok "Downloaded sshtun-user"
+            print_ok "Downloaded sshtun-user for ${arch}"
         else
-            print_fail "Failed to download sshtun-user. Check your internet connection."
+            print_fail "Failed to download sshtun-user for ${arch} architecture. Check your internet connection."
             exit 1
         fi
 
@@ -1360,11 +1390,13 @@ step_install_dnstm() {
 
     # Download binary
     print_info "Downloading dnstm..."
-    if curl -fsSL -o /usr/local/bin/dnstm https://github.com/net2share/dnstm/releases/latest/download/dnstm-linux-amd64; then
+    local arch
+    arch=$(detect_architecture)
+    if curl -fsSL -o /usr/local/bin/dnstm "https://github.com/net2share/dnstm/releases/latest/download/dnstm-linux-${arch}"; then
         chmod +x /usr/local/bin/dnstm
-        print_ok "Downloaded dnstm binary"
+        print_ok "Downloaded dnstm binary for ${arch}"
     else
-        print_fail "Failed to download dnstm"
+        print_fail "Failed to download dnstm for ${arch} architecture"
         exit 1
     fi
 
@@ -1772,11 +1804,13 @@ step_ssh_user() {
     # Install sshtun-user if not present
     if ! command -v sshtun-user &>/dev/null; then
         print_info "Downloading sshtun-user..."
-        if curl -fsSL -o /usr/local/bin/sshtun-user https://github.com/net2share/sshtun-user/releases/latest/download/sshtun-user-linux-amd64; then
+        local arch
+        arch=$(detect_architecture)
+        if curl -fsSL -o /usr/local/bin/sshtun-user "https://github.com/net2share/sshtun-user/releases/latest/download/sshtun-user-linux-${arch}"; then
             chmod +x /usr/local/bin/sshtun-user
-            print_ok "Downloaded sshtun-user"
+            print_ok "Downloaded sshtun-user for ${arch}"
         else
-            print_fail "Failed to download sshtun-user"
+            print_fail "Failed to download sshtun-user for ${arch} architecture"
             return
         fi
     else
