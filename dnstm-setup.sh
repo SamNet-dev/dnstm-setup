@@ -554,6 +554,36 @@ show_about() {
     echo ""
 }
 
+# ─── SOCKS Auth Detection Helper ──────────────────────────────────────────────
+
+# Detect SOCKS5 auth state from dnstm backend status.
+# Sets globals: SOCKS_AUTH (true/false), SOCKS_USER, SOCKS_PASS
+# Returns 0 if auth is enabled, 1 otherwise.
+detect_socks_auth() {
+    local status_output
+    status_output=$(dnstm backend status -t socks 2>/dev/null || true)
+    local detected_user detected_pass
+    detected_user=$(echo "$status_output" | sed -n 's/^[[:space:]]*User:[[:space:]]*//p' | sed 's/[[:space:]]*$//' || true)
+    detected_pass=$(echo "$status_output" | sed -n 's/^[[:space:]]*Password:[[:space:]]*//p' | sed 's/[[:space:]]*$//' || true)
+    if [[ -n "$detected_user" && -n "$detected_pass" ]]; then
+        # Reject credentials with pipe chars (would corrupt slipnet URL format)
+        if [[ "$detected_user" == *"|"* || "$detected_pass" == *"|"* ]]; then
+            SOCKS_AUTH=false
+            SOCKS_USER=""
+            SOCKS_PASS=""
+            return 1
+        fi
+        SOCKS_AUTH=true
+        SOCKS_USER="$detected_user"
+        SOCKS_PASS="$detected_pass"
+        return 0
+    fi
+    SOCKS_AUTH=false
+    SOCKS_USER=""
+    SOCKS_PASS=""
+    return 1
+}
+
 # ─── --status ───────────────────────────────────────────────────────────────────
 
 do_status() {
@@ -595,18 +625,9 @@ do_status() {
     fi
     echo ""
 
-    # ─── Detect SOCKS auth ───
-    local socks_user="" socks_pass="" socks_auth=false
-    local svc_file="/etc/systemd/system/microsocks.service"
-    if [[ -f "$svc_file" ]]; then
-        local exec_line
-        exec_line=$(grep '^ExecStart=' "$svc_file" 2>/dev/null || true)
-        socks_user=$(echo "$exec_line" | sed -n 's/.*-u \([^ ]*\).*/\1/p' || true)
-        socks_pass=$(echo "$exec_line" | sed -n 's/.*-P \([^ ]*\).*/\1/p' || true)
-        if [[ -n "$socks_user" && -n "$socks_pass" ]]; then
-            socks_auth=true
-        fi
-    fi
+    # ─── Detect SOCKS auth via dnstm ───
+    detect_socks_auth || true
+    local socks_user="$SOCKS_USER" socks_pass="$SOCKS_PASS" socks_auth="$SOCKS_AUTH"
 
     echo -e "  ${BOLD}SOCKS Proxy Authentication${NC}"
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
@@ -1332,15 +1353,9 @@ do_add_tunnel() {
 
     # Generate slipnet:// URL for non-SSH tunnels
     if [[ "$backend" == "socks" ]]; then
-        # Detect existing SOCKS auth from microsocks service
-        local s_user="" s_pass=""
-        local svc_file="/etc/systemd/system/microsocks.service"
-        if [[ -f "$svc_file" ]]; then
-            local exec_line
-            exec_line=$(grep '^ExecStart=' "$svc_file" 2>/dev/null || true)
-            s_user=$(echo "$exec_line" | sed -n 's/.*-u \([^ ]*\).*/\1/p' || true)
-            s_pass=$(echo "$exec_line" | sed -n 's/.*-P \([^ ]*\).*/\1/p' || true)
-        fi
+        # Detect existing SOCKS auth via dnstm
+        detect_socks_auth || true
+        local s_user="$SOCKS_USER" s_pass="$SOCKS_PASS"
 
         local pubkey_for_url=""
         if [[ "$transport" == "dnstt" && -f "/etc/dnstm/tunnels/${tag}/server.pub" ]]; then
@@ -1575,6 +1590,10 @@ do_manage_users() {
                 new_user=$(prompt_input "Enter username for new tunnel user")
                 if [[ -z "$new_user" ]]; then
                     print_fail "Username cannot be empty"
+                    continue
+                fi
+                if [[ "$new_user" == *"|"* ]]; then
+                    print_fail "Username cannot contain the | character"
                     continue
                 fi
                 new_pass=$(prompt_input "Enter password (leave blank to auto-generate)")
@@ -2413,9 +2432,19 @@ step_verify_microsocks() {
             print_fail "Username cannot be empty"
             SOCKS_USER="proxy"
         fi
+        # Reject pipe and colon in username (breaks slipnet URL format and curl --proxy-user)
+        if [[ "$SOCKS_USER" == *"|"* || "$SOCKS_USER" == *":"* ]]; then
+            print_warn "Username cannot contain | or : characters — using default 'proxy'"
+            SOCKS_USER="proxy"
+        fi
         SOCKS_PASS=$(prompt_input "Enter SOCKS proxy password")
         if [[ -z "$SOCKS_PASS" ]]; then
             print_fail "Password cannot be empty — disabling SOCKS auth"
+            SOCKS_USER=""
+            SOCKS_PASS=""
+        # Reject pipe in password (breaks slipnet URL pipe-delimited format)
+        elif [[ "$SOCKS_PASS" == *"|"* ]]; then
+            print_fail "Password cannot contain the | character — disabling SOCKS auth"
             SOCKS_USER=""
             SOCKS_PASS=""
         else
@@ -2427,43 +2456,11 @@ step_verify_microsocks() {
     fi
     echo ""
 
-    # Check if microsocks binary has GLIBC compatibility issues
-    local microsocks_bin
-    microsocks_bin=$(command -v microsocks 2>/dev/null || echo "/usr/local/bin/microsocks")
-    if [[ -x "$microsocks_bin" ]]; then
-        local glibc_err
-        glibc_err=$("$microsocks_bin" --help 2>&1 || true)
-        if echo "$glibc_err" | grep -q "GLIBC.*not found"; then
-            print_warn "microsocks binary is incompatible with this OS (GLIBC version mismatch)"
-            print_info "Building microsocks from source..."
-
-            # Install build tools
-            apt-get install -y -qq gcc make git >/dev/null 2>&1 || true
-
-            # Build from source
-            local build_dir="/tmp/microsocks-build"
-            rm -rf "$build_dir"
-            if git clone --quiet https://github.com/rofl0r/microsocks.git "$build_dir" 2>/dev/null; then
-                if make -C "$build_dir" -j"$(nproc)" >/dev/null 2>&1; then
-                    cp "$build_dir/microsocks" "$microsocks_bin"
-                    chmod +x "$microsocks_bin"
-                    print_ok "Built microsocks from source"
-                    # Restart the service with the new binary
-                    systemctl restart microsocks 2>/dev/null || true
-                    sleep 1
-                else
-                    print_fail "Failed to build microsocks from source"
-                fi
-            else
-                print_fail "Failed to clone microsocks repo"
-            fi
-            rm -rf "$build_dir"
-        fi
-    fi
-
-    # Check if microsocks is running
+    # Check if microsocks is running (dnstm manages the binary and service)
+    local microsocks_running=false
     if pgrep -x microsocks &>/dev/null || systemctl is-active --quiet microsocks 2>/dev/null; then
         print_ok "microsocks is running"
+        microsocks_running=true
     else
         print_warn "microsocks is not running"
         print_info "Starting microsocks..."
@@ -2471,56 +2468,28 @@ step_verify_microsocks() {
         systemctl enable microsocks 2>/dev/null || true
         if systemctl start microsocks 2>/dev/null; then
             print_ok "microsocks started"
+            microsocks_running=true
         else
             print_fail "Failed to start microsocks"
             print_info "Check: systemctl status microsocks"
         fi
     fi
 
-    # Apply SOCKS authentication if enabled
-    if [[ "$SOCKS_AUTH" == true && -n "$SOCKS_USER" && -n "$SOCKS_PASS" ]]; then
-        local svc_file="/etc/systemd/system/microsocks.service"
-        if [[ -f "$svc_file" ]]; then
-            print_info "Configuring microsocks with SOCKS5 authentication..."
-            # Read the current ExecStart line and add -u/-P flags
-            local current_exec
-            current_exec=$(grep '^ExecStart=' "$svc_file" 2>/dev/null || true)
-            if [[ -n "$current_exec" ]]; then
-                # Remove any existing -u/-P flags to avoid duplicates
-                # Use awk for safe handling of passwords with sed metacharacters
-                local clean_exec
-                clean_exec=$(echo "$current_exec" | awk '{
-                    r=""; skip=0
-                    for(i=1;i<=NF;i++){
-                        if($i=="-u"||$i=="-P"){skip=1;continue}
-                        if(skip){skip=0;continue}
-                        r=(r?r" ":"")$i
-                    }
-                    print r
-                }')
-                # Append auth flags — pass each piece via separate ENVIRON
-                # vars so shell never interprets special chars in credentials
-                _CLEAN="$clean_exec" _USER="$SOCKS_USER" _PASS="$SOCKS_PASS" awk \
-                    '/^ExecStart=/{print ENVIRON["_CLEAN"] " -u " ENVIRON["_USER"] " -P " ENVIRON["_PASS"]; next}{print}' \
-                    "$svc_file" > "${svc_file}.tmp" \
-                    && mv "${svc_file}.tmp" "$svc_file"
-                systemctl daemon-reload 2>/dev/null || true
-                systemctl restart microsocks 2>/dev/null || true
-                sleep 2
-                # Verify microsocks came back up
-                if pgrep -x microsocks &>/dev/null || systemctl is-active --quiet microsocks 2>/dev/null; then
-                    print_ok "microsocks configured with SOCKS5 authentication"
-                else
-                    print_warn "microsocks may have failed to restart — check: systemctl status microsocks"
-                fi
-            else
-                print_warn "Could not find ExecStart in microsocks.service — auth not applied"
-                SOCKS_AUTH=false
-            fi
+    # Apply SOCKS authentication via dnstm (v0.6.8+) — only if microsocks is running
+    if [[ "$microsocks_running" == true && "$SOCKS_AUTH" == true && -n "$SOCKS_USER" && -n "$SOCKS_PASS" ]]; then
+        print_info "Configuring SOCKS5 authentication via dnstm..."
+        if dnstm backend auth -t socks -u "$SOCKS_USER" -p "$SOCKS_PASS" 2>/dev/null; then
+            print_ok "SOCKS5 authentication enabled (user: ${SOCKS_USER})"
         else
-            print_warn "microsocks.service not found — auth not applied"
+            print_warn "Failed to configure SOCKS5 authentication via dnstm"
+            print_info "Try manually: dnstm backend auth -t socks -u ${SOCKS_USER} -p <password>"
             SOCKS_AUTH=false
         fi
+    fi
+
+    if [[ "$microsocks_running" != true ]]; then
+        print_warn "Skipping SOCKS proxy test — microsocks is not running"
+        return
     fi
 
     # Detect actual microsocks port (3 methods, most reliable first)
@@ -2609,11 +2578,19 @@ step_ssh_user() {
         print_fail "Username cannot be empty"
         return
     fi
+    if [[ "$SSH_USER" == *"|"* ]]; then
+        print_fail "Username cannot contain the | character"
+        return
+    fi
 
     # Get password
     SSH_PASS=$(prompt_input "Enter password for SSH tunnel user")
     if [[ -z "$SSH_PASS" ]]; then
         print_fail "Password cannot be empty"
+        return
+    fi
+    if [[ "$SSH_PASS" == *"|"* ]]; then
+        print_fail "Password cannot contain the | character"
         return
     fi
 
@@ -3044,22 +3021,11 @@ do_add_domain() {
     print_info "Creating 4 tunnels (set #${num}) for domain: ${BOLD}${DOMAIN}${NC}"
     echo ""
 
-    # Detect existing SOCKS authentication from microsocks service
-    local svc_file="/etc/systemd/system/microsocks.service"
-    if [[ -f "$svc_file" ]]; then
-        local existing_exec
-        existing_exec=$(grep '^ExecStart=' "$svc_file" 2>/dev/null || true)
-        local existing_socks_user existing_socks_pass
-        existing_socks_user=$(echo "$existing_exec" | sed -n 's/.*-u \([^ ]*\).*/\1/p' || true)
-        existing_socks_pass=$(echo "$existing_exec" | sed -n 's/.*-P \([^ ]*\).*/\1/p' || true)
-        if [[ -n "$existing_socks_user" && -n "$existing_socks_pass" ]]; then
-            SOCKS_AUTH=true
-            SOCKS_USER="$existing_socks_user"
-            SOCKS_PASS="$existing_socks_pass"
-            print_ok "Detected existing SOCKS authentication (user: ${SOCKS_USER})"
-        else
-            print_info "SOCKS proxy has no authentication configured"
-        fi
+    # Detect existing SOCKS authentication via dnstm
+    if detect_socks_auth; then
+        print_ok "Detected existing SOCKS authentication (user: ${SOCKS_USER})"
+    else
+        print_info "SOCKS proxy has no authentication configured"
     fi
     echo ""
 

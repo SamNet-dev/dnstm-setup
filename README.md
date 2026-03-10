@@ -250,11 +250,10 @@ The wizard has **12 steps**. Here's what each one does:
 
 - **Asks if you want SOCKS5 authentication** — recommended for security
   - If yes: prompts for username (default: `proxy`) and password
-  - Modifies the microsocks systemd service to require credentials
+  - Configures auth via `dnstm backend auth` (dnstm v0.6.8+)
   - If no: proxy runs open (anyone who knows the domain can connect)
 - Checks if microsocks is running (process or systemd service)
 - Starts it if not running
-- Applies SOCKS5 auth to microsocks if enabled (adds `-u`/`-P` flags to service)
 - Tests the SOCKS proxy by detecting the microsocks port and making a request through it
 </details>
 
@@ -561,7 +560,7 @@ When enabled, microsocks requires a **username and password** for every SOCKS5 c
 - The `slipnet://` share URLs automatically include the credentials (clients auto-configure)
 - The `authMode` field in SlipNet is set to `1` (username/password)
 
-The credentials are applied by adding `-u user -P pass` flags to the microsocks systemd service.
+Authentication is configured via `dnstm backend auth` (requires dnstm v0.6.8+).
 
 ### Without Authentication
 
@@ -569,32 +568,19 @@ When disabled, the proxy is **open** — anyone who can resolve the DNS tunnel d
 
 ### Changing Auth After Setup
 
-To **add** authentication to an existing open proxy:
+To **add or change** authentication:
 
 ```bash
-# 1. Edit the microsocks service
-sudo systemctl edit --full microsocks.service
-
-# 2. Find the ExecStart line and append:   -u youruser -P yourpass
-#    Example: ExecStart=/usr/local/bin/microsocks -p 19801 -u proxy -P s3cret
-
-# 3. Reload and restart
-sudo systemctl daemon-reload
-sudo systemctl restart microsocks
+sudo dnstm backend auth -t socks -u youruser -p yourpassword
 ```
 
 To **remove** authentication:
 
 ```bash
-# 1. Edit the service and remove the -u and -P flags from ExecStart
-sudo systemctl edit --full microsocks.service
-
-# 2. Reload and restart
-sudo systemctl daemon-reload
-sudo systemctl restart microsocks
+sudo dnstm backend auth -t socks --disable
 ```
 
-> **Note:** When adding a backup domain with `--add-domain`, the script auto-detects existing SOCKS authentication from the microsocks service and includes the credentials in the generated share URLs.
+> **Note:** When adding a backup domain with `--add-domain`, the script auto-detects existing SOCKS authentication via `dnstm backend status` and includes the credentials in the generated share URLs.
 
 ---
 
