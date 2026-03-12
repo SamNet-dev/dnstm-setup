@@ -781,7 +781,7 @@ do_status() {
     local has_ssh_users=false
     if command -v sshtun-user &>/dev/null; then
         local user_list
-        user_list=$(sshtun-user list 2>/dev/null || true)
+        user_list=$(timeout 10 sshtun-user list </dev/null 2>/dev/null || true)
         if [[ -n "$user_list" ]]; then
             has_ssh_users=true
             echo -e "  ${BOLD}SSH Tunnel Users${NC}"
@@ -1676,7 +1676,7 @@ do_manage_users() {
 
         # Run initial configure
         print_info "Applying SSH security configuration..."
-        if sshtun-user configure 2>&1; then
+        if timeout 30 sshtun-user configure </dev/null 2>&1; then
             print_ok "SSH configuration applied"
         else
             print_warn "SSH configuration may not have applied fully — user management may have issues"
@@ -1704,7 +1704,7 @@ do_manage_users() {
                 echo ""
                 print_info "SSH tunnel users:"
                 echo ""
-                sshtun-user list 2>&1 || print_warn "No users found or sshtun-user error"
+                timeout 10 sshtun-user list 2>&1 || print_warn "No users found or sshtun-user error"
                 ;;
             2)
                 echo ""
@@ -1727,16 +1727,16 @@ do_manage_users() {
                 fi
                 echo ""
                 if [[ -n "$new_pass" ]]; then
-                    if sshtun-user create "$new_user" --insecure-password "$new_pass" 2>&1; then
+                    if timeout 30 sshtun-user create "$new_user" --insecure-password "$new_pass" 2>&1; then
                         print_ok "User '${new_user}' created"
                     else
-                        print_fail "Failed to create user '${new_user}'"
+                        print_fail "Failed to create user '${new_user}' (command timed out or failed)"
                     fi
                 else
-                    if sshtun-user create "$new_user" 2>&1; then
-                        print_ok "User '${new_user}' created"
+                    if timeout 30 sshtun-user create "$new_user" </dev/null 2>&1; then
+                        print_ok "User '${new_user}' created (random password assigned)"
                     else
-                        print_fail "Failed to create user '${new_user}'"
+                        print_fail "Failed to create user '${new_user}' (command timed out or failed)"
                     fi
                 fi
                 ;;
@@ -1764,7 +1764,7 @@ do_manage_users() {
                     continue
                 fi
                 echo ""
-                if sshtun-user update "$upd_user" --insecure-password "$upd_pass" 2>&1; then
+                if timeout 30 sshtun-user update "$upd_user" --insecure-password "$upd_pass" 2>&1; then
                     print_ok "Password updated for '${upd_user}'"
                 else
                     print_fail "Failed to update user '${upd_user}'"
@@ -1779,7 +1779,7 @@ do_manage_users() {
                     continue
                 fi
                 if prompt_yn "Are you sure you want to delete '${del_user}'?" "n"; then
-                    if sshtun-user delete "$del_user" 2>&1; then
+                    if timeout 30 sshtun-user delete "$del_user" 2>&1; then
                         print_ok "User '${del_user}' deleted"
                     else
                         print_fail "Failed to delete user '${del_user}'"
@@ -2645,7 +2645,7 @@ step_ssh_user() {
     # Configure SSH (only needed once)
     print_info "Applying SSH security configuration..."
     local configure_output
-    configure_output=$(sshtun-user configure 2>&1) || true
+    configure_output=$(timeout 30 sshtun-user configure </dev/null 2>&1) || true
     if echo "$configure_output" | grep -qi "already"; then
         print_ok "SSH already configured"
     elif echo "$configure_output" | grep -qi "error\|fail"; then
@@ -2685,7 +2685,7 @@ step_ssh_user() {
 
     # Create user
     print_info "Creating SSH tunnel user: ${SSH_USER}..."
-    if sshtun-user create "$SSH_USER" --insecure-password "$SSH_PASS" 2>&1; then
+    if timeout 30 sshtun-user create "$SSH_USER" --insecure-password "$SSH_PASS" </dev/null 2>&1; then
         SSH_SETUP_DONE=true
         print_ok "SSH tunnel user created: ${SSH_USER}"
     else
