@@ -99,7 +99,7 @@ prompt_yn() {
     while true; do
         echo ""
         echo -ne "  ${BOLD}${question}${NC} ${yn_hint} ${DIM}[h=help]${NC} "
-        read -r answer
+        read -r answer </dev/tty 2>/dev/null || read -r answer
         answer=${answer:-$default}
         if [[ "$answer" =~ ^[Hh]$ ]]; then
             show_help_menu
@@ -123,7 +123,7 @@ prompt_input() {
         else
             echo -ne "  ${BOLD}${question}${NC} ${DIM}(h=help)${NC}: " >&2
         fi
-        read -r result
+        read -r result </dev/tty 2>/dev/null || read -r result
         result=${result:-$default}
         if [[ "$result" =~ ^[Hh]$ ]]; then
             show_help_menu >&2
@@ -178,7 +178,7 @@ help_topic_header() {
 help_press_enter() {
     echo ""
     echo -ne "  ${DIM}Press Enter to go back...${NC}"
-    read -r
+    read -r </dev/tty 2>/dev/null || read -r || true
 }
 
 help_topic_domain() {
@@ -1220,7 +1220,11 @@ do_harden() {
     fi
 
     configure_systemd_resolved_no_stub || true
-    apply_service_hardening
+    if apply_service_hardening; then
+        print_ok "Runtime hardening applied"
+    else
+        print_warn "Runtime hardening reported issues; review systemctl status for dnstm units"
+    fi
 
     echo ""
     print_info "Current unit users:"
@@ -1802,17 +1806,64 @@ do_manage_users() {
                     continue
                 fi
                 echo ""
+                local user_created=false
                 if [[ -n "$new_pass" ]]; then
                     if timeout 30 sshtun-user create "$new_user" --insecure-password "$new_pass" 2>&1; then
                         print_ok "User '${new_user}' created"
+                        user_created=true
                     else
                         print_fail "Failed to create user '${new_user}' (command timed out or failed)"
                     fi
                 else
                     if timeout 30 sshtun-user create "$new_user" </dev/null 2>&1; then
                         print_ok "User '${new_user}' created (random password assigned)"
+                        user_created=true
                     else
                         print_fail "Failed to create user '${new_user}' (command timed out or failed)"
+                    fi
+                fi
+
+                # Generate slipnet:// URLs for SSH tunnels
+                if [[ "$user_created" == true ]]; then
+                    # Get the actual password (if auto-generated, read it back)
+                    local final_pass="$new_pass"
+                    if [[ -z "$final_pass" ]]; then
+                        final_pass=$(sshtun-user show "$new_user" 2>/dev/null | grep -i pass | awk '{print $NF}' || true)
+                    fi
+                    if [[ -n "$final_pass" ]]; then
+                        echo ""
+                        print_info "SlipNet SSH config URLs for user '${new_user}':"
+                        echo ""
+                        # Find all SSH tunnels and generate URLs
+                        local s_user="" s_pass=""
+                        if detect_socks_auth; then
+                            s_user="$SOCKS_USER"
+                            s_pass="$SOCKS_PASS"
+                        fi
+                        local tunnel_domains
+                        tunnel_domains=$(dnstm tunnel list 2>/dev/null || true)
+                        # Get all unique base domains from tunnels
+                        local domains
+                        domains=$(echo "$tunnel_domains" | grep -o 'domain=[^ ]*' | sed 's/domain=//;s/^[a-z]*\.//' | sort -u || true)
+                        for dom in $domains; do
+                            DOMAIN="$dom"
+                            local pubkey=""
+                            # Find DNSTT pubkey for this domain
+                            local dnstt_tag_name
+                            dnstt_tag_name=$(echo "$tunnel_domains" | grep "domain=d\.${dom}" | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
+                            if [[ -n "$dnstt_tag_name" && -f "/etc/dnstm/tunnels/${dnstt_tag_name}/server.pub" ]]; then
+                                pubkey=$(cat "/etc/dnstm/tunnels/${dnstt_tag_name}/server.pub" 2>/dev/null || true)
+                            fi
+                            # Slipstream + SSH
+                            local url
+                            url=$(generate_slipnet_url "slipstream_ssh" "s" "" "$new_user" "$final_pass" "$s_user" "$s_pass")
+                            echo -e "  ${GREEN}s.${dom}:${NC}  ${url}"
+                            # DNSTT + SSH
+                            if [[ -n "$pubkey" ]]; then
+                                url=$(generate_slipnet_url "dnstt_ssh" "ds" "$pubkey" "$new_user" "$final_pass" "$s_user" "$s_pass")
+                                echo -e "  ${GREEN}ds.${dom}:${NC} ${url}"
+                            fi
+                        done
                     fi
                 fi
                 ;;
@@ -1850,8 +1901,13 @@ do_manage_users() {
                 echo ""
                 local del_user
                 del_user=$(prompt_input "Enter username to delete")
+                del_user=$(echo "$del_user" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                 if [[ -z "$del_user" ]]; then
                     print_fail "Username cannot be empty"
+                    continue
+                fi
+                if [[ "$del_user" == *"|"* ]]; then
+                    print_fail "Username cannot contain the | character"
                     continue
                 fi
                 if prompt_yn "Are you sure you want to delete '${del_user}'?" "n"; then
@@ -3170,24 +3226,39 @@ do_add_domain() {
     local existing_domains
     existing_domains=$(dnstm tunnel list 2>/dev/null | grep -o 'domain=[^ ]*' | sed 's/domain=//;s/^[a-z0-9]*\.//' | sort -u || true)
 
-    # Ask for new domain
-    while true; do
-        DOMAIN=$(prompt_input "Enter the new backup domain (e.g. backup.com)")
+    # Use domain from argument if provided, otherwise prompt
+    if [[ -n "$ADD_DOMAIN_ARG" ]]; then
+        DOMAIN="$ADD_DOMAIN_ARG"
         DOMAIN=$(echo "$DOMAIN" | sed 's|^[[:space:]]*||;s|[[:space:]]*$||;s|^https\?://||;s|/.*$||')
-        if [[ -z "$DOMAIN" ]]; then
-            print_fail "Domain cannot be empty. Please try again."
-        elif [[ ! "$DOMAIN" =~ \. ]]; then
-            print_fail "Invalid domain (must contain a dot). Please try again."
-        elif [[ "$DOMAIN" =~ \.\. ]]; then
-            print_fail "Invalid domain (consecutive dots not allowed). Please try again."
-        elif [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
-            print_fail "Invalid domain (use only letters, numbers, dots, hyphens). Please try again."
-        elif echo "$existing_domains" | grep -qx "$DOMAIN"; then
-            print_fail "Domain '${DOMAIN}' is already in use by an existing tunnel. Please enter a different domain."
-        else
-            break
+        if [[ -z "$DOMAIN" ]] || [[ ! "$DOMAIN" =~ \. ]]; then
+            print_fail "Invalid domain: ${ADD_DOMAIN_ARG}"
+            exit 1
         fi
-    done
+        if [[ -n "$existing_domains" ]] && echo "$existing_domains" | grep -qx "$DOMAIN"; then
+            print_fail "Domain '${DOMAIN}' is already in use by an existing tunnel."
+            exit 1
+        fi
+    else
+        # Interactive prompt — reopen /dev/tty in case stdin is a pipe
+        while true; do
+            echo -ne "  ${BOLD}Enter the new backup domain (e.g. backup.com)${NC} ${DIM}(h=help)${NC}: " >&2
+            read -r DOMAIN </dev/tty || { print_fail "Cannot read input (stdin is a pipe). Pass domain as argument: --add-domain example.com"; exit 1; }
+            DOMAIN=$(echo "$DOMAIN" | sed 's|^[[:space:]]*||;s|[[:space:]]*$||;s|^https\?://||;s|/.*$||')
+            if [[ -z "$DOMAIN" ]]; then
+                print_fail "Domain cannot be empty. Please try again."
+            elif [[ ! "$DOMAIN" =~ \. ]]; then
+                print_fail "Invalid domain (must contain a dot). Please try again."
+            elif [[ "$DOMAIN" =~ \.\. ]]; then
+                print_fail "Invalid domain (consecutive dots not allowed). Please try again."
+            elif [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+                print_fail "Invalid domain (use only letters, numbers, dots, hyphens). Please try again."
+            elif [[ -n "$existing_domains" ]] && echo "$existing_domains" | grep -qx "$DOMAIN"; then
+                print_fail "Domain '${DOMAIN}' is already in use by an existing tunnel. Please enter a different domain."
+            else
+                break
+            fi
+        done
+    fi
 
     echo ""
     print_ok "Domain: ${DOMAIN}"
@@ -3421,12 +3492,31 @@ do_add_domain() {
         s_pass="$SOCKS_PASS"
     fi
     slipnet_url=$(generate_slipnet_url "ss" "t" "" "" "" "$s_user" "$s_pass")
-    echo -e "  ${GREEN}${slip_tag}:${NC}    ${slipnet_url}"
+    echo -e "  ${GREEN}${slip_tag}:${NC}      ${slipnet_url}"
     if [[ -n "$DNSTT_PUBKEY" ]]; then
         slipnet_url=$(generate_slipnet_url "dnstt" "d" "$DNSTT_PUBKEY" "" "" "$s_user" "$s_pass")
-        echo -e "  ${GREEN}${dnstt_tag}:${NC}   ${slipnet_url}"
+        echo -e "  ${GREEN}${dnstt_tag}:${NC}     ${slipnet_url}"
     fi
-    echo -e "  ${DIM}SSH tunnel slipnet:// URLs require credentials. Use --manage → Manage SSH users first.${NC}"
+
+    # Ask user for SSH credentials to generate SSH tunnel URLs
+    echo ""
+    if prompt_yn "Generate SSH tunnel slipnet:// URLs?" "y"; then
+        local ssh_tun_user ssh_tun_pass
+        ssh_tun_user=$(prompt_input "SSH tunnel username")
+        ssh_tun_pass=$(prompt_input "SSH tunnel password")
+        if [[ "$ssh_tun_user" == *"|"* || "$ssh_tun_pass" == *"|"* ]]; then
+            print_fail "Username/password cannot contain the | character"
+        elif [[ -n "$ssh_tun_user" && -n "$ssh_tun_pass" ]]; then
+            slipnet_url=$(generate_slipnet_url "slipstream_ssh" "s" "" "$ssh_tun_user" "$ssh_tun_pass" "$s_user" "$s_pass")
+            echo -e "  ${GREEN}${slip_ssh_tag}:${NC}  ${slipnet_url}"
+            if [[ -n "$DNSTT_PUBKEY" ]]; then
+                slipnet_url=$(generate_slipnet_url "dnstt_ssh" "ds" "$DNSTT_PUBKEY" "$ssh_tun_user" "$ssh_tun_pass" "$s_user" "$s_pass")
+                echo -e "  ${GREEN}${dnstt_ssh_tag}:${NC} ${slipnet_url}"
+            fi
+        else
+            echo -e "  ${DIM}Skipped — username or password was empty.${NC}"
+        fi
+    fi
     echo ""
 
     echo -e "  ${DIM}To add more domains, run again: sudo bash $0 --add-domain${NC}"
@@ -3436,6 +3526,7 @@ do_add_domain() {
 # ─── Parse Arguments ────────────────────────────────────────────────────────────
 
 ADD_DOMAIN_MODE=false
+ADD_DOMAIN_ARG=""
 HARDEN_ONLY_MODE=false
 MANAGE_USERS_MODE=false
 DNSTT_MTU=1232
@@ -3464,7 +3555,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --remove-tunnel)
             # If $2 looks like another flag (starts with --), treat as no tag given
-            if [[ -n "${2:-}" && "${2:0:2}" != "--" ]]; then
+            if [[ -n "${2:-}" ]] && [[ "${2:0:2}" != "--" ]]; then
                 do_remove_tunnel "$2"
             else
                 do_remove_tunnel ""
@@ -3477,7 +3568,13 @@ while [[ $# -gt 0 ]]; do
             ;;
         --add-domain)
             ADD_DOMAIN_MODE=true
-            shift
+            # Accept optional domain argument: --add-domain example.com
+            if [[ -n "${2:-}" ]] && [[ ! "$2" =~ ^-- ]]; then
+                ADD_DOMAIN_ARG="$2"
+                shift 2
+            else
+                shift
+            fi
             ;;
         --users)
             MANAGE_USERS_MODE=true
@@ -3507,9 +3604,9 @@ done
 # ─── Validate conflicting flags ──────────────────────────────────────────────────
 
 mode_count=0
-[[ "$ADD_DOMAIN_MODE" == true ]] && ((mode_count++))
-[[ "$HARDEN_ONLY_MODE" == true ]] && ((mode_count++))
-[[ "$MANAGE_USERS_MODE" == true ]] && ((mode_count++))
+[[ "$ADD_DOMAIN_MODE" == true ]] && ((mode_count++)) || true
+[[ "$HARDEN_ONLY_MODE" == true ]] && ((mode_count++)) || true
+[[ "$MANAGE_USERS_MODE" == true ]] && ((mode_count++)) || true
 if [[ $mode_count -gt 1 ]]; then
     echo "Error: --add-domain, --harden, and --users cannot be combined."
     exit 1
