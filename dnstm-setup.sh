@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# dnstm-setup v1.1
+# dnstm-setup v1.3
 # Interactive DNS Tunnel Setup
-# Sets up Slipstream + DNSTT tunnels for censorship-resistant internet access
+# Sets up Slipstream + DNSTT + NoizDNS tunnels for censorship-resistant internet access
 #
 # Made By SamNet Technologies - Saman
 # GitHub: github.com/SamNet-dev/dnstm-setup
@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VERSION="1.2"
+VERSION="1.3"
 TOTAL_STEPS=12
 
 # ─── Colors & Formatting ───────────────────────────────────────────────────────
@@ -467,6 +467,7 @@ show_help() {
     echo "  sudo bash dnstm-setup.sh --add-domain  Add a backup domain to existing setup"
     echo "  sudo bash dnstm-setup.sh --mtu 1200    Set DNSTT MTU (default: 1232)"
     echo "  sudo bash dnstm-setup.sh --add-tunnel   Add a single tunnel interactively"
+    echo "  sudo bash dnstm-setup.sh --add-xray    Connect existing Xray panel via DNS tunnel"
     echo "  sudo bash dnstm-setup.sh --remove-tunnel [tag]  Remove a specific tunnel"
     echo "  sudo bash dnstm-setup.sh --harden      Apply security hardening only"
     echo "  sudo bash dnstm-setup.sh --uninstall   Remove everything"
@@ -480,6 +481,7 @@ show_help() {
     echo "  --manage       Interactive management menu (all post-setup actions)"
     echo "  --status       Show all tunnels, credentials, and share URLs"
     echo "  --add-tunnel   Add a single tunnel (interactive: choose transport, backend, domain)"
+    echo "  --add-xray     Connect existing 3x-ui panel to DNS tunnel (auto-detect + create inbound)"
     echo "  --remove-tunnel [tag]  Remove a specific tunnel (interactive if no tag given)"
     echo "  --add-domain   Add another domain to an existing server (backup/fallback)"
     echo "  --users        Manage SSH tunnel users (add, list, update, delete)"
@@ -799,7 +801,7 @@ do_status() {
     local share_url
     for tag in $tags; do
         # SOCKS tunnels — no SSH credentials needed
-        if echo "$tag" | grep -qE '^(slip[0-9]+|dnstt[0-9]+)$'; then
+        if echo "$tag" | grep -qE '^(slip[0-9]+|dnstt[0-9]+|noiz[0-9]+)$'; then
             share_url=$(dnstm tunnel share -t "$tag" 2>/dev/null || true)
             if [[ -n "$share_url" ]]; then
                 echo -e "  ${GREEN}${tag}:${NC}"
@@ -847,9 +849,9 @@ do_status() {
         local subdomain
         subdomain=$(echo "$tag_domain" | sed 's/\..*//')
 
-        # Get DNSTT pubkey if it's a dnstt tunnel
+        # Get DNSTT pubkey if it's a dnstt or xray tunnel (both use DNSTT transport)
         local pubkey=""
-        if echo "$tag" | grep -q "^dnstt"; then
+        if echo "$tag" | grep -qE "^(dnstt|xray|noiz)"; then
             if [[ -f "/etc/dnstm/tunnels/${tag}/server.pub" ]]; then
                 pubkey=$(cat "/etc/dnstm/tunnels/${tag}/server.pub" 2>/dev/null || true)
             fi
@@ -873,6 +875,20 @@ do_status() {
                 echo -e "  ${DIM}${tag}: requires SSH credentials — generate after adding user${NC}"
                 continue
                 ;;
+            xray*)
+                if [[ -n "$pubkey" ]]; then
+                    url=$(generate_slipnet_url "dnstt" "$subdomain" "$pubkey" "" "" "$s_user" "$s_pass")
+                fi
+                ;;
+            noiz[0-9]*)
+                if [[ -n "$pubkey" ]]; then
+                    url=$(generate_slipnet_url "sayedns" "$subdomain" "$pubkey" "" "" "$s_user" "$s_pass")
+                fi
+                ;;
+            noiz-ssh*)
+                echo -e "  ${DIM}${tag}: requires SSH credentials — generate after adding user${NC}"
+                continue
+                ;;
         esac
 
         if [[ -n "$url" ]]; then
@@ -881,6 +897,38 @@ do_status() {
             echo ""
         fi
     done
+
+    # ─── Xray Tunnel Info (if configured) ───
+    if [[ -d /etc/dnstm/xray ]] && ls /etc/dnstm/xray/*.conf >/dev/null 2>&1; then
+        echo -e "  ${BOLD}Xray Backend Tunnels${NC}"
+        echo -e "  ${DIM}────────────────────────────────────────${NC}"
+        local xconf
+        for xconf in /etc/dnstm/xray/*.conf; do
+            local XRAY_TAG="" XRAY_PORT="" XRAY_PROTOCOL="" XRAY_UUID="" XRAY_PASSWORD="" XRAY_PANEL="" XRAY_DOMAIN=""
+            # shellcheck disable=SC1090
+            source "$xconf"
+            echo -e "  Tag:       ${GREEN}${XRAY_TAG}${NC}"
+            echo -e "  Protocol:  ${GREEN}${XRAY_PROTOCOL}${NC}"
+            echo -e "  Domain:    ${GREEN}${XRAY_DOMAIN}${NC}"
+            echo -e "  Port:      ${GREEN}${XRAY_PORT}${NC} ${DIM}(127.0.0.1)${NC}"
+            echo -e "  Panel:     ${GREEN}${XRAY_PANEL}${NC}"
+
+            # Generate client URI
+            local xcred=""
+            if [[ -n "$XRAY_UUID" ]]; then
+                xcred="$XRAY_UUID"
+            else
+                xcred="$XRAY_PASSWORD"
+            fi
+            if [[ -n "$xcred" ]]; then
+                # Use 127.0.0.1 — client connects through DNSTT tunnel, traffic exits on server localhost
+                local xuri
+                xuri=$(generate_xray_client_uri "$XRAY_PROTOCOL" "127.0.0.1" "$XRAY_PORT" "$xcred" "DNSTT-${XRAY_PROTOCOL}")
+                echo -e "  URI:       ${GREEN}${xuri}${NC}"
+            fi
+            echo ""
+        done
+    fi
 
     echo -e "  ${BOLD}DNS Resolvers (use in SlipNet)${NC}"
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
@@ -898,7 +946,7 @@ do_status() {
 
 # Generate a slipnet:// deep-link URL for the SlipNet Android app.
 # Usage: generate_slipnet_url <tunnel_type> <subdomain> [pubkey] [ssh_user] [ssh_pass] [socks_user] [socks_pass]
-#   tunnel_type: "ss", "dnstt", "slipstream_ssh", or "dnstt_ssh" (SlipNet constants)
+#   tunnel_type: "ss", "dnstt", "sayedns", "slipstream_ssh", "dnstt_ssh", or "sayedns_ssh" (SlipNet constants)
 #   subdomain:   e.g. "t" or "d"
 #   pubkey:      DNSTT public key (required for dnstt, empty for slipstream)
 #   ssh_user:    SSH tunnel username (optional)
@@ -1337,6 +1385,24 @@ do_remove_tunnel() {
         print_warn "Remove command returned an error (tunnel may already be gone)"
     fi
 
+    # Clean up Xray config and systemd drop-in if this was an xray tunnel
+    if [[ "$target_tag" == xray* ]]; then
+        rm -f "/etc/dnstm/xray/${target_tag}.conf" 2>/dev/null || true
+        rm -f "/etc/systemd/system/dnstm-${target_tag}.service.d/10-xray-upstream.conf" 2>/dev/null || true
+        rmdir "/etc/systemd/system/dnstm-${target_tag}.service.d" 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+        print_ok "Cleaned up Xray config for ${target_tag}"
+        print_warn "Note: The Xray inbound in your panel was NOT removed. Delete it manually if needed."
+    fi
+
+    # Clean up NoizDNS systemd drop-in if this was a noiz tunnel
+    if [[ "$target_tag" == noiz* ]]; then
+        rm -f "/etc/systemd/system/dnstm-${target_tag}.service.d/10-noizdns-binary.conf" 2>/dev/null || true
+        rmdir "/etc/systemd/system/dnstm-${target_tag}.service.d" 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+        print_ok "Cleaned up NoizDNS override for ${target_tag}"
+    fi
+
     # Restart router only if tunnels remain
     local remaining
     remaining=$(dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' || true)
@@ -1660,6 +1726,11 @@ do_uninstall() {
         print_ok "Removed /usr/local/bin/sshtun-user"
     fi
 
+    if [[ -f /usr/local/bin/noizdns-server ]]; then
+        rm -f /usr/local/bin/noizdns-server
+        print_ok "Removed /usr/local/bin/noizdns-server"
+    fi
+
     # Stop microsocks
     if systemctl is-active --quiet microsocks 2>/dev/null; then
         systemctl stop microsocks 2>/dev/null || true
@@ -1667,14 +1738,16 @@ do_uninstall() {
         print_ok "Stopped and disabled microsocks"
     fi
 
-    # Remove config directory
+    # Remove config directory (includes /etc/dnstm/xray/)
     if [[ -d /etc/dnstm ]]; then
         rm -rf /etc/dnstm
-        print_ok "Removed /etc/dnstm"
+        print_ok "Removed /etc/dnstm (including Xray tunnel configs)"
     fi
 
-    # Remove systemd hardening overrides (if present)
+    # Remove systemd overrides (hardening + xray upstream drop-ins)
     find /etc/systemd/system -maxdepth 2 -type f -name '20-hardening.conf' -path '*/dnstm-*.service.d/*' -delete 2>/dev/null || true
+    find /etc/systemd/system -maxdepth 2 -type f -name '10-xray-upstream.conf' -path '*/dnstm-*.service.d/*' -delete 2>/dev/null || true
+    find /etc/systemd/system -maxdepth 2 -type f -name '10-noizdns-binary.conf' -path '*/dnstm-*.service.d/*' -delete 2>/dev/null || true
     rm -f /etc/systemd/system/microsocks.service.d/20-hardening.conf 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
     print_ok "Removed local service hardening drop-ins"
@@ -1698,6 +1771,7 @@ do_uninstall() {
     print_ok "${GREEN}Uninstall complete.${NC}"
     echo ""
     print_warn "Note: DNS records in Cloudflare were NOT removed. Remove them manually if needed."
+    print_warn "Note: Xray/3x-ui panel was NOT removed (only DNSTT tunnel configs were cleaned up)."
     echo ""
 }
 
@@ -1864,6 +1938,20 @@ do_manage_users() {
                                 url=$(generate_slipnet_url "dnstt_ssh" "ds" "$pubkey" "$new_user" "$final_pass" "$s_user" "$s_pass")
                                 echo -e "  ${GREEN}ds.${dom}:${NC} ${url}"
                             fi
+                            # NoizDNS + SSH
+                            local noiz_ssh_pk=""
+                            local noiz_ssh_tags
+                            noiz_ssh_tags=$(echo "$tunnel_domains" | grep -o 'tag=noiz-ssh[^ ]*' | sed 's/tag=//' || true)
+                            for ntag in $noiz_ssh_tags; do
+                                if [[ -f "/etc/dnstm/tunnels/${ntag}/server.pub" ]]; then
+                                    noiz_ssh_pk=$(cat "/etc/dnstm/tunnels/${ntag}/server.pub" 2>/dev/null || true)
+                                    if [[ -n "$noiz_ssh_pk" ]]; then
+                                        url=$(generate_slipnet_url "sayedns_ssh" "z" "$noiz_ssh_pk" "$new_user" "$final_pass" "$s_user" "$s_pass")
+                                        echo -e "  ${GREEN}z.${dom}:${NC}  ${url}"
+                                    fi
+                                    break
+                                fi
+                            done
                         done
                     fi
                 fi
@@ -1933,6 +2021,1105 @@ do_manage_users() {
     done
 }
 
+# ─── Xray Backend Integration ─────────────────────────────────────────────────
+
+# Install 3x-ui panel with custom credentials and port.
+# Usage: install_3xui <username> <password> <panel_port>
+install_3xui() {
+    local admin_user="$1"
+    local admin_pass="$2"
+    local panel_port="$3"
+
+    print_info "Downloading and installing 3x-ui..."
+    echo ""
+
+    # Download the install script
+    local install_script
+    install_script=$(mktemp)
+    if ! curl -fsSL -o "$install_script" "https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh" 2>/dev/null; then
+        rm -f "$install_script"
+        print_fail "Could not download 3x-ui install script."
+        return 1
+    fi
+
+    # Run non-interactively with 'y' piped for prompts
+    local install_log
+    install_log=$(mktemp)
+    if ! echo "y" | bash "$install_script" > "$install_log" 2>&1; then
+        tail -5 "$install_log"
+        rm -f "$install_log" "$install_script"
+        print_fail "3x-ui installation failed."
+        return 1
+    fi
+    tail -5 "$install_log"
+    rm -f "$install_log" "$install_script"
+
+    # Wait for service to start
+    sleep 3
+
+    if ! systemctl is-active --quiet x-ui 2>/dev/null; then
+        print_fail "3x-ui service did not start."
+        return 1
+    fi
+    print_ok "3x-ui installed and running"
+
+    # Set custom credentials and port via database
+    # IMPORTANT: if setting fails, we must output the ACTUAL values so the caller
+    # uses correct credentials for the API (avoids mismatch)
+    INSTALL_3XUI_ACTUAL_USER="$admin_user"
+    INSTALL_3XUI_ACTUAL_PASS="$admin_pass"
+    INSTALL_3XUI_ACTUAL_PORT="$panel_port"
+
+    if command -v sqlite3 &>/dev/null && [[ -f /etc/x-ui/x-ui.db ]]; then
+        # Escape single quotes for SQL safety (replace ' with '')
+        local sql_user="${admin_user//\'/\'\'}"
+        local sql_pass="${admin_pass//\'/\'\'}"
+
+        if echo "UPDATE users SET username='${sql_user}', password='${sql_pass}' WHERE id=1;" | sqlite3 /etc/x-ui/x-ui.db 2>/dev/null; then
+            print_ok "Set panel credentials: ${admin_user}"
+        else
+            print_warn "Could not set custom credentials. Using defaults: admin/admin"
+            INSTALL_3XUI_ACTUAL_USER="admin"
+            INSTALL_3XUI_ACTUAL_PASS="admin"
+        fi
+
+        # Set panel port (already validated as numeric, no injection risk)
+        local existing
+        existing=$(sqlite3 /etc/x-ui/x-ui.db "SELECT COUNT(*) FROM settings WHERE key='webPort'" 2>/dev/null || echo "0")
+        if [[ "$existing" -gt 0 ]]; then
+            if sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value='${panel_port}' WHERE key='webPort'" 2>/dev/null; then
+                print_ok "Set panel port: ${panel_port}"
+            else
+                print_warn "Could not set panel port. Using default: 2053"
+                INSTALL_3XUI_ACTUAL_PORT="2053"
+            fi
+        else
+            if sqlite3 /etc/x-ui/x-ui.db "INSERT INTO settings (key, value) VALUES ('webPort', '${panel_port}')" 2>/dev/null; then
+                print_ok "Set panel port: ${panel_port}"
+            else
+                print_warn "Could not set panel port. Using default: 2053"
+                INSTALL_3XUI_ACTUAL_PORT="2053"
+            fi
+        fi
+    else
+        print_warn "Could not set custom credentials (sqlite3 not available). Using defaults: admin/admin, port 2053"
+        INSTALL_3XUI_ACTUAL_USER="admin"
+        INSTALL_3XUI_ACTUAL_PASS="admin"
+        INSTALL_3XUI_ACTUAL_PORT="2053"
+    fi
+
+    # Restart to apply credential and port changes
+    systemctl restart x-ui 2>/dev/null || true
+    sleep 2
+
+    if systemctl is-active --quiet x-ui 2>/dev/null; then
+        print_ok "3x-ui restarted with new settings"
+    else
+        print_warn "3x-ui may need manual restart: systemctl restart x-ui"
+    fi
+}
+
+# Install raw Xray (headless, no web panel).
+# Creates a minimal Xray setup with just the binary and config.
+# Usage: install_xray_headless
+install_xray_headless() {
+    print_info "Installing Xray (headless mode, no web panel)..."
+
+    # Check if Xray binary already exists
+    if command -v xray &>/dev/null || [[ -f /usr/local/bin/xray ]]; then
+        print_ok "Xray binary already installed"
+    else
+        # Install via official script — capture output to check exit code properly
+        local install_log
+        install_log=$(mktemp)
+        if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" -- install > "$install_log" 2>&1; then
+            tail -5 "$install_log"
+            rm -f "$install_log"
+            print_fail "Xray installation failed."
+            return 1
+        fi
+        tail -3 "$install_log"
+        rm -f "$install_log"
+
+        # Verify the binary was actually installed
+        if ! command -v xray &>/dev/null && [[ ! -f /usr/local/bin/xray ]]; then
+            print_fail "Xray binary not found after installation."
+            return 1
+        fi
+        print_ok "Xray binary installed"
+    fi
+
+    # Ensure the config directory exists
+    mkdir -p /usr/local/etc/xray
+
+    # Create a minimal config with just an empty inbounds array
+    # (the actual inbound will be added by create_headless_xray_inbound)
+    if [[ ! -f /usr/local/etc/xray/config.json ]]; then
+        cat > /usr/local/etc/xray/config.json <<'XRAYEOF'
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [],
+  "outbounds": [
+    {"protocol": "freedom", "tag": "direct"},
+    {"protocol": "blackhole", "tag": "block"}
+  ]
+}
+XRAYEOF
+        chmod 600 /usr/local/etc/xray/config.json
+        print_ok "Created minimal Xray config"
+    fi
+
+    # Enable and start the service
+    systemctl enable xray 2>/dev/null || true
+    systemctl start xray 2>/dev/null || true
+
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        print_ok "Xray service running (headless)"
+    else
+        print_warn "Xray service may need manual start: systemctl start xray"
+    fi
+}
+
+# Create an inbound directly in Xray config.json (headless mode, no panel).
+# Usage: create_headless_xray_inbound
+# Requires: XRAY_PROTOCOL, XRAY_INBOUND_PORT
+# Sets: XRAY_UUID or XRAY_PASSWORD
+create_headless_xray_inbound() {
+    local config_file="/usr/local/etc/xray/config.json"
+
+    if [[ ! -f "$config_file" ]]; then
+        print_fail "Xray config not found at ${config_file}"
+        return 1
+    fi
+
+    # Generate credentials
+    XRAY_UUID=""
+    XRAY_PASSWORD=""
+    if [[ "$XRAY_PROTOCOL" == "vless" || "$XRAY_PROTOCOL" == "vmess" ]]; then
+        XRAY_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || openssl rand -hex 16 | sed 's/\(.\{8\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{12\}\)/\1-\2-\3-\4-\5/')
+    else
+        XRAY_PASSWORD=$(openssl rand -hex 16)
+    fi
+
+    # Build the new inbound JSON
+    local new_inbound
+    case "$XRAY_PROTOCOL" in
+        vless)
+            new_inbound=$(jq -nc --arg uuid "$XRAY_UUID" --argjson port "$XRAY_INBOUND_PORT" '{
+                "listen": "127.0.0.1", "port": $port, "protocol": "vless",
+                "settings": {"clients": [{"id": $uuid, "flow": ""}], "decryption": "none"},
+                "streamSettings": {"network": "tcp", "security": "none"},
+                "tag": "dnstt-vless"
+            }')
+            ;;
+        shadowsocks)
+            new_inbound=$(jq -nc --arg pass "$XRAY_PASSWORD" --argjson port "$XRAY_INBOUND_PORT" '{
+                "listen": "127.0.0.1", "port": $port, "protocol": "shadowsocks",
+                "settings": {"method": "chacha20-ietf-poly1305", "password": $pass, "network": "tcp,udp"},
+                "tag": "dnstt-shadowsocks"
+            }')
+            ;;
+        vmess)
+            new_inbound=$(jq -nc --arg uuid "$XRAY_UUID" --argjson port "$XRAY_INBOUND_PORT" '{
+                "listen": "127.0.0.1", "port": $port, "protocol": "vmess",
+                "settings": {"clients": [{"id": $uuid, "alterId": 0}]},
+                "streamSettings": {"network": "tcp", "security": "none"},
+                "tag": "dnstt-vmess"
+            }')
+            ;;
+        trojan)
+            new_inbound=$(jq -nc --arg pass "$XRAY_PASSWORD" --argjson port "$XRAY_INBOUND_PORT" '{
+                "listen": "127.0.0.1", "port": $port, "protocol": "trojan",
+                "settings": {"clients": [{"password": $pass}]},
+                "streamSettings": {"network": "tcp", "security": "none"},
+                "tag": "dnstt-trojan"
+            }')
+            ;;
+    esac
+
+    # Backup original config
+    cp "$config_file" "${config_file}.bak.$(date +%s)" 2>/dev/null || true
+
+    # Add inbound to the config using jq
+    local tmp_config
+    tmp_config=$(mktemp)
+    if jq --argjson inbound "$new_inbound" '.inbounds += [$inbound]' "$config_file" > "$tmp_config" 2>/dev/null; then
+        mv "$tmp_config" "$config_file"
+        chmod 600 "$config_file"
+        print_ok "Added inbound: ${XRAY_PROTOCOL} on 127.0.0.1:${XRAY_INBOUND_PORT}"
+    else
+        rm -f "$tmp_config"
+        print_fail "Failed to update Xray config."
+        return 1
+    fi
+
+    # Restart Xray to apply
+    systemctl restart xray 2>/dev/null || true
+    sleep 1
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        print_ok "Xray restarted with new inbound"
+    else
+        print_warn "Xray may need manual restart: systemctl restart xray"
+    fi
+}
+
+# Detect if an Xray panel (3x-ui) is installed on this server.
+# Sets XRAY_PANEL_TYPE to "3xui" or "none"
+# Sets XRAY_PANEL_PORT if detected
+detect_xray_panel() {
+    XRAY_PANEL_TYPE="none"
+    XRAY_PANEL_PORT=""
+    XRAY_PANEL_RUNNING=false
+
+    # Check for 3x-ui (native install)
+    local found_3xui=false
+    if systemctl is-active --quiet x-ui 2>/dev/null; then
+        found_3xui=true
+        XRAY_PANEL_RUNNING=true
+    elif systemctl list-unit-files 2>/dev/null | grep -q 'x-ui'; then
+        found_3xui=true
+    elif [[ -d /usr/local/x-ui ]]; then
+        found_3xui=true
+    elif command -v x-ui &>/dev/null; then
+        found_3xui=true
+    fi
+
+    # Check for Docker-based 3x-ui
+    if [[ "$found_3xui" == false ]] && command -v docker &>/dev/null; then
+        if docker ps 2>/dev/null | grep -qi 'x-ui\|3x-ui'; then
+            found_3xui=true
+            XRAY_PANEL_RUNNING=true
+        fi
+    fi
+
+    if [[ "$found_3xui" == true ]]; then
+        XRAY_PANEL_TYPE="3xui"
+
+        # Warn if service exists but is not running
+        if [[ "$XRAY_PANEL_RUNNING" == false ]]; then
+            print_warn "3x-ui is installed but NOT running."
+            print_info "Start it with: systemctl start x-ui"
+            echo ""
+        fi
+
+        # Try to detect panel port
+        # Method 1: Parse x-ui config.json
+        if [[ -f /usr/local/x-ui/config.json ]]; then
+            XRAY_PANEL_PORT=$(jq -r '.port // .webPort // empty' /usr/local/x-ui/config.json 2>/dev/null || true)
+        fi
+
+        # Method 2: Check x-ui.db for webPort setting
+        if [[ -z "$XRAY_PANEL_PORT" ]] && command -v sqlite3 &>/dev/null; then
+            if [[ -f /etc/x-ui/x-ui.db ]]; then
+                XRAY_PANEL_PORT=$(sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key='webPort'" 2>/dev/null || true)
+            fi
+        fi
+
+        # Method 3: Try common 3x-ui ports (skip 443 — too likely to be nginx)
+        if [[ -z "$XRAY_PANEL_PORT" ]]; then
+            for port in 2053 54321 2087 2083; do
+                if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+                    XRAY_PANEL_PORT="$port"
+                    break
+                fi
+            done
+        fi
+
+        # Method 4: Fall back to default
+        XRAY_PANEL_PORT="${XRAY_PANEL_PORT:-2053}"
+    fi
+}
+
+# Get 3x-ui admin credentials. Tries to read from DB first, then asks user.
+# Sets XRAY_ADMIN_USER and XRAY_ADMIN_PASS
+get_3xui_credentials() {
+    XRAY_ADMIN_USER=""
+    XRAY_ADMIN_PASS=""
+
+    # Try to read from database
+    if command -v sqlite3 &>/dev/null && [[ -f /etc/x-ui/x-ui.db ]]; then
+        XRAY_ADMIN_USER=$(sqlite3 /etc/x-ui/x-ui.db "SELECT username FROM users LIMIT 1" 2>/dev/null || true)
+        XRAY_ADMIN_PASS=$(sqlite3 /etc/x-ui/x-ui.db "SELECT password FROM users LIMIT 1" 2>/dev/null || true)
+    fi
+
+    # Detect bcrypt-hashed passwords (3x-ui v2.0+ hashes by default)
+    # Hashed passwords start with $2a$, $2b$, or $2y$ and cannot be used as plaintext
+    if [[ -n "$XRAY_ADMIN_PASS" && "$XRAY_ADMIN_PASS" == \$2[aby]\$* ]]; then
+        print_warn "Password in database is hashed (3x-ui v2.0+). Manual entry required."
+        XRAY_ADMIN_PASS=""
+    fi
+
+    if [[ -n "$XRAY_ADMIN_USER" && -n "$XRAY_ADMIN_PASS" ]]; then
+        print_ok "Read credentials from 3x-ui database"
+        return 0
+    fi
+
+    # Ask user — keep DB username if we have it, only ask for what's missing
+    echo ""
+    echo -e "  ${BOLD}3x-ui Panel Credentials${NC}"
+    echo -e "  ${DIM}(needed to create the Xray inbound via API)${NC}"
+    echo ""
+    if [[ -z "$XRAY_ADMIN_USER" ]]; then
+        XRAY_ADMIN_USER=$(prompt_input "Panel username" "admin")
+    else
+        echo -e "  ${DIM}Username from database: ${XRAY_ADMIN_USER}${NC}"
+    fi
+    echo ""
+    read -rsp "  Panel password [admin]: " XRAY_ADMIN_PASS
+    XRAY_ADMIN_PASS="${XRAY_ADMIN_PASS:-admin}"
+    echo ""
+
+    if [[ -z "$XRAY_ADMIN_USER" ]]; then
+        print_fail "Username cannot be empty."
+        return 1
+    fi
+}
+
+# Let user choose which Xray protocol to use for the inbound.
+# Sets XRAY_PROTOCOL
+pick_xray_protocol() {
+    echo ""
+    echo -e "  ${BOLD}Xray Protocol:${NC}"
+    echo -e "  ${BOLD}1)${NC}  VLESS        ${DIM}(lightweight, recommended)${NC}"
+    echo -e "  ${BOLD}2)${NC}  Shadowsocks  ${DIM}(widely supported, simple)${NC}"
+    echo -e "  ${BOLD}3)${NC}  VMess        ${DIM}(V2Ray protocol)${NC}"
+    echo -e "  ${BOLD}4)${NC}  Trojan       ${DIM}(HTTPS-like)${NC}"
+    echo ""
+    local choice
+    choice=$(prompt_input "Select protocol (1-4)" "1")
+    case "$choice" in
+        1) XRAY_PROTOCOL="vless" ;;
+        2) XRAY_PROTOCOL="shadowsocks" ;;
+        3) XRAY_PROTOCOL="vmess" ;;
+        4) XRAY_PROTOCOL="trojan" ;;
+        *)
+            print_fail "Invalid selection. Use 1-4."
+            return 1
+            ;;
+    esac
+    print_ok "Protocol: ${XRAY_PROTOCOL}"
+}
+
+# Auto-find a free port for the Xray inbound, let user override.
+# Sets XRAY_INBOUND_PORT
+pick_xray_port() {
+    local port
+    # Find a free port
+    local attempts=0
+    while true; do
+        port=$((RANDOM % 50000 + 10000))
+        if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+            break
+        fi
+        attempts=$((attempts + 1))
+        if [[ $attempts -ge 50 ]]; then
+            port=18443
+            break
+        fi
+    done
+
+    echo ""
+    XRAY_INBOUND_PORT=$(prompt_input "Xray inbound port (internal only, not exposed)" "$port")
+
+    # Validate
+    if ! [[ "$XRAY_INBOUND_PORT" =~ ^[0-9]+$ ]] || [[ "$XRAY_INBOUND_PORT" -lt 1 ]] || [[ "$XRAY_INBOUND_PORT" -gt 65535 ]]; then
+        print_fail "Invalid port number. Must be between 1 and 65535."
+        return 1
+    fi
+
+    if ss -tlnp 2>/dev/null | grep -q ":${XRAY_INBOUND_PORT} "; then
+        print_warn "Port ${XRAY_INBOUND_PORT} is already in use. Continuing anyway (may be intended)."
+    fi
+
+    print_ok "Inbound port: ${XRAY_INBOUND_PORT} (127.0.0.1 only)"
+}
+
+# Create a new inbound on the 3x-ui panel via its API.
+# Requires: XRAY_ADMIN_USER, XRAY_ADMIN_PASS, XRAY_PANEL_PORT, XRAY_PROTOCOL, XRAY_INBOUND_PORT
+# Sets: XRAY_UUID (for vless/vmess) or XRAY_PASSWORD (for ss/trojan)
+create_3xui_inbound() {
+    local panel_url="http://127.0.0.1:${XRAY_PANEL_PORT}"
+    local cookie_jar
+    cookie_jar=$(mktemp)
+    chmod 600 "$cookie_jar" 2>/dev/null || true
+
+    # Ensure cookie jar is cleaned up on any exit path
+    trap 'rm -f "$cookie_jar"' RETURN
+
+    # Generate credentials for the inbound
+    XRAY_UUID=""
+    XRAY_PASSWORD=""
+    if [[ "$XRAY_PROTOCOL" == "vless" || "$XRAY_PROTOCOL" == "vmess" ]]; then
+        XRAY_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || openssl rand -hex 16 | sed 's/\(.\{8\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{12\}\)/\1-\2-\3-\4-\5/')
+    else
+        XRAY_PASSWORD=$(openssl rand -hex 16)
+    fi
+
+    # Login to panel
+    print_info "Logging in to 3x-ui panel..."
+    local login_resp
+    login_resp=$(curl -s -c "$cookie_jar" -X POST "${panel_url}/login" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        --data-urlencode "username=${XRAY_ADMIN_USER}" \
+        --data-urlencode "password=${XRAY_ADMIN_PASS}" \
+        --max-time 10 2>/dev/null || true)
+
+    if [[ -z "$login_resp" ]]; then
+        print_fail "Could not connect to 3x-ui panel at ${panel_url}"
+        print_info "Is the panel running? Check: systemctl status x-ui"
+        return 1
+    fi
+
+    local login_success
+    login_success=$(echo "$login_resp" | jq -r '.success // false' 2>/dev/null || echo "false")
+    if [[ "$login_success" != "true" ]]; then
+        print_fail "Login failed. Check username/password."
+        print_info "Response: $(echo "$login_resp" | jq -r '.msg // "unknown error"' 2>/dev/null || echo "$login_resp")"
+        return 1
+    fi
+    print_ok "Logged in to 3x-ui"
+
+    # Build inbound settings JSON based on protocol
+    local settings stream_settings sniffing_settings remark
+    remark="DNSTT-${XRAY_PROTOCOL}-${XRAY_INBOUND_PORT}"
+
+    sniffing_settings='{"enabled":true,"destOverride":["http","tls","quic","fakedns"]}'
+    stream_settings='{"network":"tcp","security":"none","tcpSettings":{"header":{"type":"none"}}}'
+
+    case "$XRAY_PROTOCOL" in
+        vless)
+            settings=$(jq -nc --arg uuid "$XRAY_UUID" '{
+                "clients": [{"id": $uuid, "flow": "", "email": "dnstt-user", "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true}],
+                "decryption": "none",
+                "fallbacks": []
+            }')
+            ;;
+        shadowsocks)
+            settings=$(jq -nc --arg pass "$XRAY_PASSWORD" '{
+                "method": "chacha20-ietf-poly1305",
+                "password": $pass,
+                "network": "tcp,udp",
+                "clients": []
+            }')
+            ;;
+        vmess)
+            settings=$(jq -nc --arg uuid "$XRAY_UUID" '{
+                "clients": [{"id": $uuid, "alterId": 0, "email": "dnstt-user", "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true}]
+            }')
+            ;;
+        trojan)
+            settings=$(jq -nc --arg pass "$XRAY_PASSWORD" '{
+                "clients": [{"password": $pass, "email": "dnstt-user", "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true}],
+                "fallbacks": []
+            }')
+            ;;
+    esac
+
+    # Create inbound via API
+    print_info "Creating inbound: ${XRAY_PROTOCOL} on 127.0.0.1:${XRAY_INBOUND_PORT}..."
+    local inbound_data
+    inbound_data=$(jq -nc \
+        --arg remark "$remark" \
+        --argjson port "$XRAY_INBOUND_PORT" \
+        --arg protocol "$XRAY_PROTOCOL" \
+        --arg settings "$settings" \
+        --arg stream "$stream_settings" \
+        --arg sniffing "$sniffing_settings" \
+        '{
+            "up": 0, "down": 0,
+            "total": 0,
+            "remark": $remark,
+            "enable": true,
+            "expiryTime": 0,
+            "listen": "127.0.0.1",
+            "port": $port,
+            "protocol": $protocol,
+            "settings": $settings,
+            "streamSettings": $stream,
+            "sniffing": $sniffing
+        }')
+
+    local create_resp
+    create_resp=$(curl -s -b "$cookie_jar" -X POST "${panel_url}/panel/api/inbounds/add" \
+        -H "Content-Type: application/json" \
+        -d "$inbound_data" \
+        --max-time 10 2>/dev/null || true)
+
+    if [[ -z "$create_resp" ]]; then
+        print_fail "No response from panel when creating inbound."
+        return 1
+    fi
+
+    local create_success
+    create_success=$(echo "$create_resp" | jq -r '.success // false' 2>/dev/null || echo "false")
+    if [[ "$create_success" != "true" ]]; then
+        print_fail "Failed to create inbound."
+        print_info "Response: $(echo "$create_resp" | jq -r '.msg // "unknown error"' 2>/dev/null || echo "$create_resp")"
+        return 1
+    fi
+
+    print_ok "Created inbound: ${remark} (127.0.0.1:${XRAY_INBOUND_PORT})"
+}
+
+# Create a systemd drop-in override to redirect the DNSTT tunnel upstream
+# from microsocks to the Xray inbound port.
+# Usage: create_xray_service_override <tag> <xray_port> <domain>
+create_xray_service_override() {
+    local tag="$1"
+    local xray_port="$2"
+    local domain="$3"
+    local service="dnstm-${tag}.service"
+    local dropin_dir="/etc/systemd/system/${service}.d"
+    local dropin_file="${dropin_dir}/10-xray-upstream.conf"
+
+    # Parse original ExecStart to get the tunnel's listening port and key path
+    # Use 'systemctl show' for the resolved ExecStart (avoids drop-in merging issues)
+    local orig_exec
+    orig_exec=$(systemctl cat "$service" 2>/dev/null | grep '^ExecStart=/' | head -1 || true)
+    # Fallback: if drop-in already exists, grep for the binary path line
+    if [[ -z "$orig_exec" ]]; then
+        orig_exec=$(systemctl cat "$service" 2>/dev/null | grep '^ExecStart=.*dnstt-server' | tail -1 || true)
+    fi
+
+    if [[ -z "$orig_exec" ]]; then
+        print_fail "Could not read ExecStart from ${service}"
+        return 1
+    fi
+
+    # Extract the listening port (-udp :PORT part) — no Perl regex needed
+    local tunnel_port
+    tunnel_port=$(echo "$orig_exec" | grep -oE '\-udp[[:space:]]+:?[0-9]+' | grep -oE '[0-9]+' || true)
+    if [[ -z "$tunnel_port" ]]; then
+        print_fail "Could not detect tunnel listening port from service"
+        return 1
+    fi
+
+    # Extract the privkey path
+    local privkey_path
+    privkey_path=$(echo "$orig_exec" | sed -n 's/.*-privkey-file[[:space:]]\+\([^[:space:]]\+\).*/\1/p' || true)
+    if [[ -z "$privkey_path" ]]; then
+        privkey_path="/etc/dnstm/tunnels/${tag}/server.key"
+    fi
+
+    # Extract MTU flag if present (e.g., -mtu 1100)
+    local mtu_arg=""
+    local orig_mtu
+    orig_mtu=$(echo "$orig_exec" | grep -oE '\-mtu[[:space:]]+[0-9]+' || true)
+    if [[ -n "$orig_mtu" ]]; then
+        mtu_arg=" ${orig_mtu}"
+    fi
+
+    # Extract the dnstt-server binary path (first token after ExecStart=)
+    local dnstt_bin
+    dnstt_bin=$(echo "$orig_exec" | sed 's/^ExecStart=[-+!@]*//;s/[[:space:]].*//' || true)
+    if [[ -z "$dnstt_bin" || ! -f "$dnstt_bin" ]]; then
+        # Fallback to common locations
+        for bin_path in /usr/local/bin/dnstt-server /usr/bin/dnstt-server; do
+            if [[ -f "$bin_path" ]]; then
+                dnstt_bin="$bin_path"
+                break
+            fi
+        done
+    fi
+
+    if [[ -z "$dnstt_bin" ]]; then
+        print_fail "Could not find dnstt-server binary"
+        return 1
+    fi
+
+    if ! mkdir -p "$dropin_dir" 2>/dev/null; then
+        print_fail "Could not create drop-in directory: ${dropin_dir}"
+        return 1
+    fi
+    cat > "$dropin_file" <<EOF || { print_fail "Could not write service override: ${dropin_file}"; return 1; }
+[Service]
+ExecStart=
+ExecStart=${dnstt_bin} -udp :${tunnel_port}${mtu_arg} -privkey-file ${privkey_path} ${domain} 127.0.0.1:${xray_port}
+EOF
+
+    print_ok "Created service override: ${service} → 127.0.0.1:${xray_port}"
+}
+
+# Generate a client share URI for the Xray tunnel.
+# Usage: generate_xray_client_uri <protocol> <server_ip> <port> <uuid_or_pass> [remark]
+# Returns the URI string
+generate_xray_client_uri() {
+    local protocol="$1"
+    local server_ip="$2"
+    local port="$3"
+    local credential="$4"
+    local remark="${5:-DNSTT-Xray}"
+
+    # URL-encode the remark (pure bash, no python dependency)
+    local encoded_remark=""
+    local i c
+    for (( i=0; i<${#remark}; i++ )); do
+        c="${remark:$i:1}"
+        case "$c" in
+            [a-zA-Z0-9._~-]) encoded_remark+="$c" ;;
+            *) encoded_remark+=$(printf '%%%02X' "'$c") ;;
+        esac
+    done
+
+    # Handle IPv6 addresses — wrap in brackets for URIs
+    local host="$server_ip"
+    if [[ "$server_ip" == *:* ]]; then
+        host="[${server_ip}]"
+    fi
+
+    case "$protocol" in
+        vless)
+            echo "vless://${credential}@${host}:${port}?encryption=none&type=tcp&security=none#${encoded_remark}"
+            ;;
+        shadowsocks)
+            local method="chacha20-ietf-poly1305"
+            # SIP002 requires URL-safe base64 (RFC 4648 section 5): +/ → -_, no padding
+            local encoded
+            encoded=$(echo -n "${method}:${credential}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+            echo "ss://${encoded}@${host}:${port}#${encoded_remark}"
+            ;;
+        vmess)
+            local vmess_json
+            vmess_json=$(jq -nc \
+                --arg ip "$server_ip" \
+                --arg port "$port" \
+                --arg uuid "$credential" \
+                --arg remark "$remark" \
+                '{
+                    "v": "2",
+                    "ps": $remark,
+                    "add": $ip,
+                    "port": $port,
+                    "id": $uuid,
+                    "aid": "0",
+                    "net": "tcp",
+                    "type": "none",
+                    "host": "",
+                    "path": "",
+                    "tls": "",
+                    "scy": "auto"
+                }')
+            echo "vmess://$(echo -n "$vmess_json" | base64 -w0)"
+            ;;
+        trojan)
+            echo "trojan://${credential}@${host}:${port}?type=tcp&security=none#${encoded_remark}"
+            ;;
+    esac
+}
+
+# Save Xray tunnel config to /etc/dnstm/xray/
+# Usage: save_xray_config <tag>
+save_xray_config() {
+    local tag="$1"
+    local config_dir="/etc/dnstm/xray"
+    local config_file="${config_dir}/${tag}.conf"
+
+    if ! mkdir -p "$config_dir" 2>/dev/null; then
+        print_warn "Could not create config directory: ${config_dir}"
+        return 1
+    fi
+    chmod 700 "$config_dir" 2>/dev/null || true
+    # Create file with restrictive permissions before writing any secrets
+    # Use subshell umask to ensure touch fallback is also restrictive
+    install -m 600 /dev/null "$config_file" 2>/dev/null || (umask 077; touch "$config_file")
+    chmod 600 "$config_file" 2>/dev/null || true
+    # Use printf %q to safely quote all values (handles special chars)
+    {
+        printf 'XRAY_TAG=%q\n' "$tag"
+        printf 'XRAY_PORT=%q\n' "$XRAY_INBOUND_PORT"
+        printf 'XRAY_PROTOCOL=%q\n' "$XRAY_PROTOCOL"
+        printf 'XRAY_UUID=%q\n' "$XRAY_UUID"
+        printf 'XRAY_PASSWORD=%q\n' "$XRAY_PASSWORD"
+        printf 'XRAY_PANEL=%q\n' "$XRAY_PANEL_TYPE"
+        printf 'XRAY_DOMAIN=%q\n' "x.${DOMAIN}"
+    } > "$config_file" || { print_warn "Could not write config: ${config_file}"; return 1; }
+    print_ok "Saved config: ${config_file}"
+}
+
+# ─── NoizDNS Service Override ─────────────────────────────────────────────────
+
+# Override a DNSTT tunnel's systemd service to use the NoizDNS binary instead.
+# Only swaps the binary path, keeps the same upstream/flags/keys.
+# Usage: create_noizdns_service_override <tag>
+create_noizdns_service_override() {
+    local tag="$1"
+    local service="dnstm-${tag}.service"
+    local dropin_dir="/etc/systemd/system/${service}.d"
+    local dropin_file="${dropin_dir}/10-noizdns-binary.conf"
+
+    # Read original ExecStart
+    local orig_exec
+    orig_exec=$(systemctl cat "$service" 2>/dev/null | grep '^ExecStart=/' | head -1 || true)
+    if [[ -z "$orig_exec" ]]; then
+        orig_exec=$(systemctl cat "$service" 2>/dev/null | grep '^ExecStart=.*dnstt-server' | tail -1 || true)
+    fi
+    if [[ -z "$orig_exec" ]]; then
+        print_fail "Could not read ExecStart from ${service}"
+        return 1
+    fi
+
+    # Replace the dnstt-server binary path with noizdns-server, keep everything else
+    local new_exec
+    new_exec=$(echo "$orig_exec" | sed 's|ExecStart=[^ ]*/dnstt-server|ExecStart=/usr/local/bin/noizdns-server|')
+
+    if ! mkdir -p "$dropin_dir" 2>/dev/null; then
+        print_fail "Could not create drop-in directory: ${dropin_dir}"
+        return 1
+    fi
+    cat > "$dropin_file" <<EOF || { print_fail "Could not write NoizDNS override: ${dropin_file}"; return 1; }
+[Service]
+ExecStart=
+${new_exec}
+EOF
+    print_ok "NoizDNS binary override: ${service}"
+}
+
+# Main Xray backend integration function
+do_add_xray() {
+    banner
+
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "  ${CROSS} Not running as root. Please run with: sudo bash $0 --add-xray"
+        exit 1
+    fi
+
+    if ! command -v dnstm &>/dev/null; then
+        print_fail "dnstm is not installed. Run the full setup first: sudo bash $0"
+        exit 1
+    fi
+
+    print_header "Xray Backend via DNS Tunnel"
+
+    echo ""
+    echo -e "  ${BOLD}How this works:${NC}"
+    echo -e "  ${DIM}This connects your existing Xray panel (3x-ui) to a DNSTT tunnel.${NC}"
+    echo -e "  ${DIM}A new internal-only Xray inbound is created on 127.0.0.1, then a${NC}"
+    echo -e "  ${DIM}DNSTT tunnel is set up to forward DNS traffic to that inbound.${NC}"
+    echo ""
+    echo -e "  ${DIM}Flow: Phone (SlipNet+Nekobox) → DNS tunnel → Xray inbound → Internet${NC}"
+    echo ""
+
+    # Ensure required tools are available
+    if ! command -v curl &>/dev/null; then
+        print_fail "curl is required but not installed. Install it: apt-get install curl"
+        exit 1
+    fi
+    if ! command -v jq &>/dev/null; then
+        print_info "Installing jq..."
+        if apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq jq >/dev/null 2>&1; then
+            print_ok "Installed jq"
+        else
+            print_fail "Failed to install jq. Install it manually: apt-get install jq"
+            exit 1
+        fi
+    fi
+
+    # Detect server IP
+    SERVER_IP=$(curl -4 -s --max-time 10 https://api.ipify.org 2>/dev/null || true)
+    if [[ -n "$SERVER_IP" ]]; then
+        print_ok "Server IP: ${SERVER_IP}"
+    else
+        print_warn "Could not detect server IP"
+        SERVER_IP=$(prompt_input "Enter server IP manually" "")
+        if [[ -z "$SERVER_IP" ]]; then
+            print_fail "Server IP is required."
+            exit 1
+        fi
+    fi
+
+    # Show current tunnels
+    echo ""
+    print_info "Current tunnels:"
+    echo ""
+    dnstm tunnel list 2>/dev/null || print_info "(none)"
+    echo ""
+
+    # 1. Detect Xray panel
+    print_info "Detecting Xray panel..."
+    detect_xray_panel
+
+    if [[ "$XRAY_PANEL_TYPE" == "none" ]]; then
+        echo ""
+        print_warn "No Xray installation detected on this server."
+        echo ""
+        echo -e "  ${BOLD}How would you like to set up Xray?${NC}"
+        echo -e "  ${BOLD}1)${NC}  Full panel (3x-ui)   ${DIM}— web dashboard, user management, traffic stats${NC}"
+        echo -e "  ${BOLD}2)${NC}  Headless (Xray only) ${DIM}— no web panel, lightweight, config-based${NC}"
+        echo -e "  ${BOLD}0)${NC}  Cancel"
+        echo ""
+        local install_choice
+        install_choice=$(prompt_input "Select (0-2)" "1")
+
+        case "$install_choice" in
+            1)
+                # Full panel install
+                echo ""
+                echo -e "  ${BOLD}3x-ui Panel Setup${NC}"
+                echo -e "  ${DIM}Choose admin credentials and panel port.${NC}"
+                echo ""
+                local new_user new_pass new_port
+                new_user=$(prompt_input "Panel admin username" "admin")
+                echo ""
+                new_pass=$(prompt_input "Panel admin password" "password")
+                echo ""
+                new_port=$(prompt_input "Panel web port" "2053")
+                if ! [[ "$new_port" =~ ^[0-9]+$ ]]; then
+                    new_port=2053
+                fi
+                echo ""
+
+                install_3xui "$new_user" "$new_pass" "$new_port" || return 1
+
+                # Use ACTUAL values (may differ from requested if sqlite3 failed)
+                XRAY_PANEL_TYPE="3xui"
+                XRAY_PANEL_PORT="${INSTALL_3XUI_ACTUAL_PORT}"
+                XRAY_PANEL_RUNNING=true
+                XRAY_ADMIN_USER="${INSTALL_3XUI_ACTUAL_USER}"
+                XRAY_ADMIN_PASS="${INSTALL_3XUI_ACTUAL_PASS}"
+
+                echo ""
+                echo -e "  ${BOLD}Panel Access${NC}"
+                echo -e "  ${DIM}────────────────────────────────────────${NC}"
+                echo -e "  URL:       ${GREEN}http://${SERVER_IP}:${XRAY_PANEL_PORT}${NC}"
+                echo -e "  Username:  ${GREEN}${XRAY_ADMIN_USER}${NC}"
+                echo -e "  Password:  ${GREEN}${XRAY_ADMIN_PASS}${NC}"
+                echo ""
+                ;;
+            2)
+                # Headless install
+                echo ""
+                install_xray_headless || return 1
+                XRAY_PANEL_TYPE="headless"
+                XRAY_PANEL_RUNNING=true
+                echo ""
+                ;;
+            0|*)
+                echo ""
+                print_info "Cancelled."
+                return 0
+                ;;
+        esac
+    else
+        print_ok "Detected: 3x-ui (port ${XRAY_PANEL_PORT})"
+    fi
+
+    # 2. Get panel credentials (skip for headless — no panel API needed)
+    if [[ "$XRAY_PANEL_TYPE" == "3xui" && -z "${XRAY_ADMIN_USER:-}" ]]; then
+        get_3xui_credentials || return 1
+    fi
+
+    # 3. Choose protocol
+    pick_xray_protocol || return 1
+
+    # 4. Pick port for internal inbound
+    pick_xray_port || return 1
+
+    # 5. Get domain
+    echo ""
+    echo -e "  ${BOLD}Domain Configuration${NC}"
+    echo -e "  ${DIM}The Xray tunnel will use subdomain: x.<your-domain>${NC}"
+    echo ""
+
+    # Try to detect domain from existing tunnels
+    local detected_domain=""
+    detected_domain=$(dnstm tunnel list 2>/dev/null | grep -o 'domain=[^ ]*' | head -1 | sed 's/domain=//' | sed 's/^[^.]*\.//' || true)
+
+    if [[ -n "$detected_domain" ]]; then
+        DOMAIN=$(prompt_input "Domain" "$detected_domain")
+    else
+        DOMAIN=$(prompt_input "Enter your domain (e.g. example.com)" "")
+    fi
+
+    if [[ -z "$DOMAIN" ]]; then
+        print_fail "Domain is required."
+        return 1
+    fi
+    print_ok "Tunnel domain: x.${DOMAIN}"
+
+    # Check if x.DOMAIN tunnel already exists (prevent duplicates)
+    if dnstm tunnel list 2>/dev/null | grep -q "domain=x\.${DOMAIN}"; then
+        print_fail "A tunnel for x.${DOMAIN} already exists."
+        print_info "Remove it first with: sudo bash $0 --remove-tunnel"
+        return 1
+    fi
+
+    # 6. Create Xray inbound
+    echo ""
+    if [[ "$XRAY_PANEL_TYPE" == "headless" ]]; then
+        create_headless_xray_inbound || return 1
+    else
+        create_3xui_inbound || return 1
+    fi
+
+    # 7. Create DNSTT tunnel via dnstm
+    echo ""
+
+    # Determine tag — check existing xray tags and increment (exact match)
+    local xray_num=1
+    while dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | grep -qxF "tag=xray${xray_num}"; do
+        xray_num=$((xray_num + 1))
+    done
+    local tag="xray${xray_num}"
+
+    print_info "Creating DNSTT tunnel: ${tag} (x.${DOMAIN})..."
+    local mtu_flag=""
+    if [[ -n "${DNSTT_MTU:-}" ]]; then
+        mtu_flag="--mtu ${DNSTT_MTU}"
+    fi
+    # shellcheck disable=SC2086
+    local create_output
+    create_output=$(dnstm tunnel add --transport dnstt --backend socks --domain "x.${DOMAIN}" --tag "$tag" $mtu_flag 2>&1) || true
+    echo "$create_output"
+
+    if ! dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | grep -qxF "tag=${tag}"; then
+        print_fail "Tunnel creation failed."
+        if [[ "$XRAY_PANEL_TYPE" == "headless" ]]; then
+            print_info "Note: Xray inbound on port ${XRAY_INBOUND_PORT} was added to config.json but the tunnel failed."
+            print_info "Remove it manually: edit /usr/local/etc/xray/config.json"
+        else
+            print_info "Note: Xray inbound on port ${XRAY_INBOUND_PORT} was created in 3x-ui but the tunnel failed."
+            print_info "Remove it manually from the panel dashboard if needed."
+        fi
+        return 1
+    fi
+    print_ok "Created tunnel: ${tag}"
+
+    # 8. Override upstream to point at Xray instead of microsocks
+    echo ""
+    print_info "Redirecting tunnel upstream to Xray..."
+    if ! create_xray_service_override "$tag" "$XRAY_INBOUND_PORT" "x.${DOMAIN}"; then
+        # Rollback: remove the tunnel we just created
+        print_warn "Service override failed. Rolling back tunnel..."
+        dnstm tunnel stop --tag "$tag" 2>/dev/null || true
+        dnstm tunnel remove --tag "$tag" 2>/dev/null || true
+        if [[ "$XRAY_PANEL_TYPE" == "headless" ]]; then
+            print_info "Note: Xray inbound on port ${XRAY_INBOUND_PORT} was added to config.json but not cleaned up."
+            print_info "Remove it manually: edit /usr/local/etc/xray/config.json"
+        else
+            print_info "Note: Xray inbound on port ${XRAY_INBOUND_PORT} was NOT removed from 3x-ui panel."
+            print_info "Remove it manually from the panel dashboard if needed."
+        fi
+        return 1
+    fi
+
+    # 9. Reload and start
+    if ! systemctl daemon-reload 2>/dev/null; then
+        print_warn "systemctl daemon-reload failed — continuing anyway"
+    fi
+    print_info "Starting tunnel: ${tag}..."
+    # Use restart (not start) to ensure the service override takes effect
+    # If the tunnel was auto-started by dnstm, 'start' would be a no-op
+    if systemctl restart "dnstm-${tag}.service" 2>/dev/null; then
+        print_ok "Started: ${tag}"
+    elif dnstm tunnel start --tag "$tag" 2>/dev/null; then
+        print_ok "Started: ${tag}"
+    else
+        print_warn "Could not start tunnel. Check: dnstm tunnel logs --tag ${tag}"
+    fi
+
+    print_info "Restarting DNS Router..."
+    dnstm router stop 2>/dev/null || true
+    sleep 1
+    if dnstm router start 2>/dev/null; then
+        print_ok "DNS Router restarted"
+    else
+        print_warn "DNS Router restart may have issues. Check: dnstm router logs"
+    fi
+
+    # 10. Save config
+    save_xray_config "$tag" || print_warn "Could not save Xray config (tunnel is running but config not persisted)"
+
+    # 11. Show DNSTT public key
+    local pubkey=""
+    if [[ -f "/etc/dnstm/tunnels/${tag}/server.pub" ]]; then
+        pubkey=$(cat "/etc/dnstm/tunnels/${tag}/server.pub" 2>/dev/null || true)
+    fi
+
+    # 12. Summary
+    echo ""
+    echo ""
+    echo -e "  ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${GREEN}${BOLD}  XRAY BACKEND TUNNEL CREATED  ${NC}"
+    echo -e "  ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  ${BOLD}Server Info${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+    echo -e "  Server IP :  ${GREEN}${SERVER_IP}${NC}"
+    echo -e "  Domain    :  ${GREEN}x.${DOMAIN}${NC}"
+    echo -e "  Tag       :  ${GREEN}${tag}${NC}"
+    echo ""
+    echo -e "  ${BOLD}Xray Inbound${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+    echo -e "  Protocol  :  ${GREEN}${XRAY_PROTOCOL}${NC}"
+    echo -e "  Port      :  ${GREEN}${XRAY_INBOUND_PORT}${NC} ${DIM}(127.0.0.1 only)${NC}"
+    if [[ -n "$XRAY_UUID" ]]; then
+        echo -e "  UUID      :  ${GREEN}${XRAY_UUID}${NC}"
+    fi
+    if [[ -n "$XRAY_PASSWORD" ]]; then
+        echo -e "  Password  :  ${GREEN}${XRAY_PASSWORD}${NC}"
+    fi
+    echo ""
+
+    if [[ -n "$pubkey" ]]; then
+        echo -e "  ${BOLD}DNSTT Public Key${NC}"
+        echo -e "  ${DIM}────────────────────────────────────────${NC}"
+        echo -e "  ${GREEN}${pubkey}${NC}"
+        echo ""
+    fi
+
+    # Generate client URI
+    local credential
+    if [[ -n "$XRAY_UUID" ]]; then
+        credential="$XRAY_UUID"
+    else
+        credential="$XRAY_PASSWORD"
+    fi
+    # Use 127.0.0.1 as address — client connects through DNSTT tunnel (SlipNet),
+    # so traffic exits on the server side where Xray listens on localhost only
+    local client_uri
+    client_uri=$(generate_xray_client_uri "$XRAY_PROTOCOL" "127.0.0.1" "$XRAY_INBOUND_PORT" "$credential" "DNSTT-${XRAY_PROTOCOL}")
+
+    echo -e "  ${BOLD}Client URI (for Nekobox)${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+    echo -e "  ${GREEN}${client_uri}${NC}"
+    echo ""
+
+    # Generate slipnet:// URL for this tunnel (include SOCKS auth if configured)
+    if [[ -n "$pubkey" ]]; then
+        local s_user="" s_pass=""
+        detect_socks_auth 2>/dev/null || true
+        if [[ "${SOCKS_AUTH:-}" == true ]]; then
+            s_user="${SOCKS_USER:-}"
+            s_pass="${SOCKS_PASS:-}"
+        fi
+        local slipnet_url
+        slipnet_url=$(generate_slipnet_url "dnstt" "x" "$pubkey" "" "" "$s_user" "$s_pass")
+        echo -e "  ${BOLD}SlipNet URL (for DNSTT tunnel)${NC}"
+        echo -e "  ${DIM}────────────────────────────────────────${NC}"
+        echo -e "  ${GREEN}${slipnet_url}${NC}"
+        echo ""
+    fi
+
+    echo -e "  ${BOLD}Required DNS Record (Cloudflare)${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+    echo -e "  Type: ${YELLOW}NS${NC}  │  Name: ${YELLOW}x${NC}  │  Value: ${YELLOW}ns.${DOMAIN}${NC}"
+    echo -e "  ${DIM}Proxy: OFF (grey cloud)${NC}"
+    echo ""
+
+    echo -e "  ${BOLD}Client Setup (Nekobox + SlipNet)${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+    echo -e "  ${DIM}1. Import SlipNet URL above into SlipNet app${NC}"
+    echo -e "  ${DIM}2. Enable 'Proxy Only Mode' in SlipNet (SOCKS on 127.0.0.1:1080)${NC}"
+    echo -e "  ${DIM}3. In Nekobox, add new proxy using the Client URI above${NC}"
+    echo -e "  ${DIM}4. In Nekobox, chain it through SlipNet's SOCKS proxy${NC}"
+    echo -e "  ${DIM}5. Enable 'UDP over TCP' in both configs${NC}"
+    echo -e "  ${DIM}6. Bypass SlipNet from Nekobox routing to avoid loops${NC}"
+    echo ""
+    echo -e "  ${DIM}Management: sudo bash $0 --manage${NC}"
+    echo -e "  ${DIM}Status:     sudo bash $0 --status${NC}"
+    echo ""
+}
+
 # ─── --manage ────────────────────────────────────────────────────────────────────
 
 do_manage() {
@@ -1962,15 +3149,16 @@ do_manage() {
         echo -e "  ${BOLD}5)${NC}  Manage SSH users      ${DIM}(add, list, update, delete)${NC}"
         echo -e "  ${BOLD}6)${NC}  Configure SOCKS auth  ${DIM}(enable, disable, or change credentials)${NC}"
         echo -e "  ${BOLD}7)${NC}  Apply hardening       ${DIM}(systemd security for all services)${NC}"
+        echo -e "  ${BOLD}8)${NC}  Xray backend          ${DIM}(connect 3x-ui panel via DNS tunnel)${NC}"
         echo ""
         echo -e "  ${DIM}──────────────────────────────────────────────${NC}"
-        echo -e "  ${BOLD}${RED}8)${NC}  ${RED}Uninstall everything${NC}"
+        echo -e "  ${BOLD}${RED}9)${NC}  ${RED}Uninstall everything${NC}"
         echo ""
         echo -e "  ${BOLD}0)${NC}  Exit"
         echo ""
 
         local choice=""
-        read -rp "  Select [0-8]: " choice || break
+        read -rp "  Select [0-9]: " choice || break
 
         case "$choice" in
             1)
@@ -1995,6 +3183,9 @@ do_manage() {
                 ( trap - INT; do_harden ) || true
                 ;;
             8)
+                ( trap - INT; do_add_xray ) || true
+                ;;
+            9)
                 ( trap - INT; do_uninstall ) || true
                 # If uninstall succeeded, dnstm is gone — exit menu
                 hash -d dnstm 2>/dev/null || true
@@ -2013,7 +3204,7 @@ do_manage() {
                 continue
                 ;;
             *)
-                print_warn "Invalid choice. Enter 0-8."
+                print_warn "Invalid choice. Enter 0-9."
                 sleep 1
                 continue
                 ;;
@@ -2034,6 +3225,7 @@ do_manage() {
 DOMAIN=""
 SERVER_IP=""
 DNSTT_PUBKEY=""
+NOIZDNS_PUBKEY=""
 SSH_USER=""
 SSH_PASS=""
 SOCKS_USER=""
@@ -2149,7 +3341,9 @@ step_dns_records() {
         "Record 2:  Type: NS  | Name: t   | Value: ns.${DOMAIN}" \
         "Record 3:  Type: NS  | Name: d   | Value: ns.${DOMAIN}" \
         "Record 4:  Type: NS  | Name: s   | Value: ns.${DOMAIN}" \
-        "Record 5:  Type: NS  | Name: ds  | Value: ns.${DOMAIN}"
+        "Record 5:  Type: NS  | Name: ds  | Value: ns.${DOMAIN}" \
+        "Record 6:  Type: NS  | Name: n   | Value: ns.${DOMAIN}" \
+        "Record 7:  Type: NS  | Name: z   | Value: ns.${DOMAIN}"
 
     echo ""
     print_warn "IMPORTANT: The A record MUST be DNS Only (grey cloud, NOT orange)"
@@ -2158,8 +3352,10 @@ step_dns_records() {
     echo "  Subdomain purposes:"
     echo "    t   = Slipstream + SOCKS tunnel"
     echo "    d   = DNSTT + SOCKS tunnel"
+    echo "    n   = NoizDNS + SOCKS tunnel (DPI-resistant)"
     echo "    s   = Slipstream + SSH tunnel"
     echo "    ds  = DNSTT + SSH tunnel"
+    echo "    z   = NoizDNS + SSH tunnel (DPI-resistant)"
     echo ""
 
     if ! prompt_yn "Have you created these DNS records in Cloudflare?" "n"; then
@@ -2352,6 +3548,20 @@ step_install_dnstm() {
     echo "    - Firewall rules (port 53)"
     echo "    - DNS Router service"
     echo "    - microsocks SOCKS5 proxy"
+
+    # Download NoizDNS server binary (DPI-resistant DNSTT fork)
+    echo ""
+    print_info "Downloading NoizDNS server (DPI-resistant tunnel)..."
+    # NoizDNS uses "arm" not "armv7" for ARM builds
+    local noizdns_arch="$arch"
+    [[ "$noizdns_arch" == "armv7" ]] && noizdns_arch="arm"
+    local noizdns_url="https://raw.githubusercontent.com/anonvector/noizdns-deploy/main/bin/dnstt-server-linux-${noizdns_arch}"
+    if curl -fsSL -o /usr/local/bin/noizdns-server "$noizdns_url" 2>/dev/null; then
+        chmod +x /usr/local/bin/noizdns-server
+        print_ok "NoizDNS server installed"
+    else
+        print_warn "Could not download NoizDNS server (NoizDNS tunnels will be skipped)"
+    fi
 }
 
 # ─── STEP 6: Verify Port 53 ────────────────────────────────────────────────────
@@ -2423,7 +3633,9 @@ step_create_tunnels() {
     print_step 7 "Create Tunnels"
 
     local any_created=false
-    print_info "Creating 4 tunnels for domain: ${BOLD}${DOMAIN}${NC}"
+    local _tunnel_count=4
+    [[ -x /usr/local/bin/noizdns-server ]] && _tunnel_count=6
+    print_info "Creating ${_tunnel_count} tunnels for domain: ${BOLD}${DOMAIN}${NC}"
     echo ""
 
     # Ask for DNSTT MTU (use CLI value as default if provided via --mtu)
@@ -2511,6 +3723,54 @@ step_create_tunnels() {
         fi
     fi
 
+    # ─── NoizDNS tunnels (5 & 6) ───
+    if [[ -x /usr/local/bin/noizdns-server ]]; then
+        echo ""
+        echo -e "  ${DIM}───────────────────────────────────────────────${NC}"
+        echo -e "  ${BOLD}Tunnel 5: NoizDNS + SOCKS (DPI-resistant)${NC}"
+        echo ""
+        if dnstm tunnel add --transport dnstt --backend socks --domain "n.${DOMAIN}" --tag noiz1 --mtu "$DNSTT_MTU" 2>&1; then
+            print_ok "Created: noiz1 (NoizDNS + SOCKS) on n.${DOMAIN}"
+            any_created=true
+        else
+            print_warn "Tunnel noiz1 may already exist or creation failed"
+        fi
+        # Override binary to use noizdns-server
+        create_noizdns_service_override "noiz1" || print_warn "Could not set NoizDNS binary for noiz1"
+        echo ""
+
+        # Extract NoizDNS pubkey
+        if [[ -f /etc/dnstm/tunnels/noiz1/server.pub ]]; then
+            NOIZDNS_PUBKEY=$(cat /etc/dnstm/tunnels/noiz1/server.pub 2>/dev/null || true)
+            if [[ -n "$NOIZDNS_PUBKEY" ]]; then
+                echo -e "  ${BOLD}${YELLOW}NoizDNS Public Key:${NC}"
+                echo -e "  ${GREEN}${NOIZDNS_PUBKEY}${NC}"
+            fi
+        fi
+
+        echo ""
+        echo -e "  ${DIM}───────────────────────────────────────────────${NC}"
+        echo -e "  ${BOLD}Tunnel 6: NoizDNS + SSH (DPI-resistant)${NC}"
+        echo ""
+        if dnstm tunnel add --transport dnstt --backend ssh --domain "z.${DOMAIN}" --tag noiz-ssh --mtu "$DNSTT_MTU" 2>&1; then
+            print_ok "Created: noiz-ssh (NoizDNS + SSH) on z.${DOMAIN}"
+            any_created=true
+        else
+            print_warn "Tunnel noiz-ssh may already exist or creation failed"
+        fi
+        # Override binary to use noizdns-server
+        create_noizdns_service_override "noiz-ssh" || print_warn "Could not set NoizDNS binary for noiz-ssh"
+        echo ""
+    else
+        echo ""
+        print_warn "NoizDNS binary not available — skipping NoizDNS tunnels (n, z subdomains)"
+    fi
+
+    # Re-read NoizDNS key if not captured (e.g., tunnel already existed)
+    if [[ -z "$NOIZDNS_PUBKEY" && -f /etc/dnstm/tunnels/noiz1/server.pub ]]; then
+        NOIZDNS_PUBKEY=$(cat /etc/dnstm/tunnels/noiz1/server.pub 2>/dev/null || true)
+    fi
+
     if [[ "$any_created" == true ]]; then
         TUNNELS_CHANGED=true
     fi
@@ -2521,6 +3781,9 @@ step_create_tunnels() {
 
 step_start_services() {
     print_step 8 "Start Services"
+
+    # Reload systemd to pick up any service overrides (e.g., NoizDNS binary swap)
+    systemctl daemon-reload 2>/dev/null || true
 
     # Only restart router if tunnels/install changed (avoid downtime on re-runs)
     if [[ "$TUNNELS_CHANGED" == "true" ]]; then
@@ -2583,6 +3846,7 @@ step_start_services() {
     all_tags=$(dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
     if [[ -z "$all_tags" ]]; then
         all_tags="slip1 dnstt1 slip-ssh dnstt-ssh"
+        [[ -x /usr/local/bin/noizdns-server ]] && all_tags+=" noiz1 noiz-ssh"
     fi
     for tag in $all_tags; do
         print_info "Starting tunnel: ${tag}..."
@@ -2907,11 +4171,13 @@ step_tests() {
     if [[ -n "$tunnel_output" ]]; then
         local running_count
         running_count=$(echo "$tunnel_output" | grep -ci "running" || echo "0")
-        if [[ "$running_count" -ge 4 ]]; then
+        local expected_tunnels=4
+        [[ -x /usr/local/bin/noizdns-server ]] && expected_tunnels=6
+        if [[ "$running_count" -ge "$expected_tunnels" ]]; then
             print_ok "All tunnels running: PASS (${running_count} running)"
             pass=$((pass + 1))
         elif [[ "$running_count" -ge 1 ]]; then
-            print_warn "Some tunnels running: ${running_count}/4"
+            print_warn "Some tunnels running: ${running_count}/${expected_tunnels}"
             pass=$((pass + 1))
         else
             print_fail "No tunnels running: FAIL"
@@ -3033,8 +4299,14 @@ step_summary() {
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
     echo -e "  Slipstream + SOCKS:  ${GREEN}t.${DOMAIN}${NC}"
     echo -e "  DNSTT + SOCKS:       ${GREEN}d.${DOMAIN}${NC}"
+    if [[ -x /usr/local/bin/noizdns-server ]]; then
+        echo -e "  NoizDNS + SOCKS:     ${GREEN}n.${DOMAIN}${NC}  ${DIM}(DPI-resistant)${NC}"
+    fi
     echo -e "  Slipstream + SSH:    ${GREEN}s.${DOMAIN}${NC}"
     echo -e "  DNSTT + SSH:         ${GREEN}ds.${DOMAIN}${NC}"
+    if [[ -x /usr/local/bin/noizdns-server ]]; then
+        echo -e "  NoizDNS + SSH:       ${GREEN}z.${DOMAIN}${NC}  ${DIM}(DPI-resistant)${NC}"
+    fi
     echo ""
 
     if [[ -n "$DNSTT_PUBKEY" ]]; then
@@ -3051,18 +4323,32 @@ step_summary() {
         echo ""
     fi
 
+    if [[ -n "$NOIZDNS_PUBKEY" ]]; then
+        echo -e "  ${BOLD}NoizDNS Public Keys${NC}"
+        echo -e "  ${DIM}────────────────────────────────────────${NC}"
+        echo -e "  ${GREEN}noiz1 (SOCKS):${NC}   ${NOIZDNS_PUBKEY}"
+        local _noiz_ssh_pk=""
+        if [[ -f /etc/dnstm/tunnels/noiz-ssh/server.pub ]]; then
+            _noiz_ssh_pk=$(cat /etc/dnstm/tunnels/noiz-ssh/server.pub 2>/dev/null || true)
+        fi
+        if [[ -n "$_noiz_ssh_pk" ]]; then
+            echo -e "  ${GREEN}noiz-ssh (SSH):${NC}  ${_noiz_ssh_pk}"
+        fi
+        echo ""
+    fi
+
     # Generate share URLs (dnst:// for dnstc CLI)
     echo -e "  ${BOLD}Share URLs — dnst:// (for dnstc CLI)${NC}"
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
     local share_url
-    for tag in slip1 dnstt1; do
+    for tag in slip1 dnstt1 noiz1; do
         share_url=$(dnstm tunnel share -t "$tag" 2>/dev/null || true)
         if [[ -n "$share_url" ]]; then
             echo -e "  ${GREEN}${tag}:${NC} ${share_url}"
         fi
     done
     if [[ "$SSH_SETUP_DONE" == true && -n "$SSH_USER" && -n "$SSH_PASS" ]]; then
-        for tag in slip-ssh dnstt-ssh; do
+        for tag in slip-ssh dnstt-ssh noiz-ssh; do
             share_url=$(dnstm tunnel share -t "$tag" --user "$SSH_USER" --password "$SSH_PASS" 2>/dev/null || true)
             if [[ -n "$share_url" ]]; then
                 echo -e "  ${GREEN}${tag}:${NC} ${share_url}"
@@ -3086,13 +4372,18 @@ step_summary() {
     # DNSTT + SOCKS
     if [[ -n "$DNSTT_PUBKEY" ]]; then
         slipnet_url=$(generate_slipnet_url "dnstt" "d" "$DNSTT_PUBKEY" "" "" "$s_user" "$s_pass")
-        echo -e "  ${GREEN}dnstt1:${NC}   ${slipnet_url}"
+        echo -e "  ${GREEN}dnstt1:${NC}    ${slipnet_url}"
+    fi
+    # NoizDNS + SOCKS
+    if [[ -n "$NOIZDNS_PUBKEY" ]]; then
+        slipnet_url=$(generate_slipnet_url "sayedns" "n" "$NOIZDNS_PUBKEY" "" "" "$s_user" "$s_pass")
+        echo -e "  ${GREEN}noiz1:${NC}     ${slipnet_url}"
     fi
     # SSH tunnels
     if [[ "$SSH_SETUP_DONE" == true && -n "$SSH_USER" && -n "$SSH_PASS" ]]; then
         slipnet_url=$(generate_slipnet_url "slipstream_ssh" "s" "" "$SSH_USER" "$SSH_PASS" "$s_user" "$s_pass")
-        echo -e "  ${GREEN}slip-ssh:${NC} ${slipnet_url}"
-        # dnstt-ssh has its own keypair — read from its own tunnel dir
+        echo -e "  ${GREEN}slip-ssh:${NC}  ${slipnet_url}"
+        # dnstt-ssh has its own keypair
         local dnstt_ssh_pubkey=""
         if [[ -f /etc/dnstm/tunnels/dnstt-ssh/server.pub ]]; then
             dnstt_ssh_pubkey=$(cat /etc/dnstm/tunnels/dnstt-ssh/server.pub 2>/dev/null || true)
@@ -3100,6 +4391,15 @@ step_summary() {
         if [[ -n "$dnstt_ssh_pubkey" ]]; then
             slipnet_url=$(generate_slipnet_url "dnstt_ssh" "ds" "$dnstt_ssh_pubkey" "$SSH_USER" "$SSH_PASS" "$s_user" "$s_pass")
             echo -e "  ${GREEN}dnstt-ssh:${NC} ${slipnet_url}"
+        fi
+        # NoizDNS + SSH
+        local noiz_ssh_pubkey=""
+        if [[ -f /etc/dnstm/tunnels/noiz-ssh/server.pub ]]; then
+            noiz_ssh_pubkey=$(cat /etc/dnstm/tunnels/noiz-ssh/server.pub 2>/dev/null || true)
+        fi
+        if [[ -n "$noiz_ssh_pubkey" ]]; then
+            slipnet_url=$(generate_slipnet_url "sayedns_ssh" "z" "$noiz_ssh_pubkey" "$SSH_USER" "$SSH_PASS" "$s_user" "$s_pass")
+            echo -e "  ${GREEN}noiz-ssh:${NC}  ${slipnet_url}"
         fi
     fi
     echo ""
@@ -3278,7 +4578,9 @@ do_add_domain() {
         "Record 2:  Type: NS  | Name: t   | Value: ns.${DOMAIN}" \
         "Record 3:  Type: NS  | Name: d   | Value: ns.${DOMAIN}" \
         "Record 4:  Type: NS  | Name: s   | Value: ns.${DOMAIN}" \
-        "Record 5:  Type: NS  | Name: ds  | Value: ns.${DOMAIN}"
+        "Record 5:  Type: NS  | Name: ds  | Value: ns.${DOMAIN}" \
+        "Record 6:  Type: NS  | Name: n   | Value: ns.${DOMAIN}" \
+        "Record 7:  Type: NS  | Name: z   | Value: ns.${DOMAIN}"
 
     echo ""
     print_warn "IMPORTANT: The A record MUST be DNS Only (grey cloud, NOT orange)"
@@ -3383,8 +4685,46 @@ do_add_domain() {
         DNSTT_PUBKEY=$(cat "/etc/dnstm/tunnels/${dnstt_tag}/server.pub" 2>/dev/null || true)
     fi
 
+    # NoizDNS tunnels (if binary available)
+    if [[ -x /usr/local/bin/noizdns-server ]]; then
+        local noiz_tag="noiz${num}"
+        local noiz_ssh_tag="noiz-ssh${num}"
+
+        echo ""
+        echo -e "  ${DIM}───────────────────────────────────────────────${NC}"
+        echo -e "  ${BOLD}Tunnel: NoizDNS + SOCKS (DPI-resistant)${NC}"
+        echo ""
+        if dnstm tunnel add --transport dnstt --backend socks --domain "n.${DOMAIN}" --tag "$noiz_tag" --mtu "$DNSTT_MTU" 2>&1; then
+            print_ok "Created: ${noiz_tag} (NoizDNS + SOCKS) on n.${DOMAIN}"
+        else
+            print_warn "Tunnel ${noiz_tag} may already exist or creation failed"
+        fi
+        create_noizdns_service_override "$noiz_tag" || print_warn "Could not set NoizDNS binary for ${noiz_tag}"
+
+        # Extract NoizDNS pubkey
+        if [[ -f "/etc/dnstm/tunnels/${noiz_tag}/server.pub" ]]; then
+            NOIZDNS_PUBKEY=$(cat "/etc/dnstm/tunnels/${noiz_tag}/server.pub" 2>/dev/null || true)
+        fi
+        echo ""
+
+        echo -e "  ${DIM}───────────────────────────────────────────────${NC}"
+        echo -e "  ${BOLD}Tunnel: NoizDNS + SSH (DPI-resistant)${NC}"
+        echo ""
+        if dnstm tunnel add --transport dnstt --backend ssh --domain "z.${DOMAIN}" --tag "$noiz_ssh_tag" --mtu "$DNSTT_MTU" 2>&1; then
+            print_ok "Created: ${noiz_ssh_tag} (NoizDNS + SSH) on z.${DOMAIN}"
+        else
+            print_warn "Tunnel ${noiz_ssh_tag} may already exist or creation failed"
+        fi
+        create_noizdns_service_override "$noiz_ssh_tag" || print_warn "Could not set NoizDNS binary for ${noiz_ssh_tag}"
+        echo ""
+    fi
+
     print_ok "All tunnels created"
     echo ""
+
+    # Reload systemd to pick up any service overrides (NoizDNS binary swap)
+    # Must happen BEFORE router restart to ensure overrides are active
+    systemctl daemon-reload 2>/dev/null || true
 
     # Restart router to pick up new tunnel config
     print_info "Restarting DNS Router to load new tunnels..."
@@ -3397,9 +4737,14 @@ do_add_domain() {
     fi
     echo ""
 
-    # Start new tunnels
+    # Start new tunnels (include NoizDNS if available)
+    local _start_tags="$slip_tag $dnstt_tag $slip_ssh_tag $dnstt_ssh_tag"
+    if [[ -x /usr/local/bin/noizdns-server ]]; then
+        _start_tags+=" ${noiz_tag:-} ${noiz_ssh_tag:-}"
+    fi
     print_info "Starting new tunnels..."
-    for tag in "$slip_tag" "$dnstt_tag" "$slip_ssh_tag" "$dnstt_ssh_tag"; do
+    for tag in $_start_tags; do
+        [[ -z "$tag" ]] && continue
         if dnstm tunnel start --tag "$tag" 2>/dev/null; then
             print_ok "Started: ${tag}"
         else
@@ -3450,8 +4795,14 @@ do_add_domain() {
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
     echo -e "  Slipstream + SOCKS:  ${GREEN}t.${DOMAIN}${NC}  (${slip_tag})"
     echo -e "  DNSTT + SOCKS:       ${GREEN}d.${DOMAIN}${NC}  (${dnstt_tag})"
+    if [[ -n "${noiz_tag:-}" ]]; then
+        echo -e "  NoizDNS + SOCKS:     ${GREEN}n.${DOMAIN}${NC}  (${noiz_tag})  ${DIM}(DPI-resistant)${NC}"
+    fi
     echo -e "  Slipstream + SSH:    ${GREEN}s.${DOMAIN}${NC}  (${slip_ssh_tag})"
     echo -e "  DNSTT + SSH:         ${GREEN}ds.${DOMAIN}${NC}  (${dnstt_ssh_tag})"
+    if [[ -n "${noiz_ssh_tag:-}" ]]; then
+        echo -e "  NoizDNS + SSH:       ${GREEN}z.${DOMAIN}${NC}  (${noiz_ssh_tag})  ${DIM}(DPI-resistant)${NC}"
+    fi
     echo ""
 
     if [[ -n "$DNSTT_PUBKEY" ]]; then
@@ -3468,11 +4819,27 @@ do_add_domain() {
         echo ""
     fi
 
+    if [[ -n "${NOIZDNS_PUBKEY:-}" ]]; then
+        echo -e "  ${BOLD}NoizDNS Public Keys${NC}"
+        echo -e "  ${DIM}────────────────────────────────────────${NC}"
+        echo -e "  ${GREEN}${noiz_tag} (SOCKS):${NC}   ${NOIZDNS_PUBKEY}"
+        local _noiz_ssh_pk=""
+        if [[ -n "${noiz_ssh_tag:-}" && -f "/etc/dnstm/tunnels/${noiz_ssh_tag}/server.pub" ]]; then
+            _noiz_ssh_pk=$(cat "/etc/dnstm/tunnels/${noiz_ssh_tag}/server.pub" 2>/dev/null || true)
+        fi
+        if [[ -n "$_noiz_ssh_pk" ]]; then
+            echo -e "  ${GREEN}${noiz_ssh_tag} (SSH):${NC}  ${_noiz_ssh_pk}"
+        fi
+        echo ""
+    fi
+
     # Generate share URLs for new tunnels (dnst:// for dnstc CLI)
     echo -e "  ${BOLD}Share URLs — dnst:// (for dnstc CLI)${NC}"
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
     local share_url
-    for tag in "$slip_tag" "$dnstt_tag"; do
+    local _socks_tags="$slip_tag $dnstt_tag"
+    [[ -n "${noiz_tag:-}" ]] && _socks_tags+=" $noiz_tag"
+    for tag in $_socks_tags; do
         share_url=$(dnstm tunnel share -t "$tag" 2>/dev/null || true)
         if [[ -n "$share_url" ]]; then
             echo -e "  ${GREEN}${tag}:${NC} ${share_url}"
@@ -3482,6 +4849,9 @@ do_add_domain() {
     echo -e "  ${DIM}Note: SSH tunnel share URLs require credentials. Generate them with:${NC}"
     echo -e "  ${DIM}  dnstm tunnel share -t ${slip_ssh_tag} --user <username> --password <pass>${NC}"
     echo -e "  ${DIM}  dnstm tunnel share -t ${dnstt_ssh_tag} --user <username> --password <pass>${NC}"
+    if [[ -n "${noiz_ssh_tag:-}" ]]; then
+        echo -e "  ${DIM}  dnstm tunnel share -t ${noiz_ssh_tag} --user <username> --password <pass>${NC}"
+    fi
     echo ""
 
     # Generate SlipNet deep-link URLs for new tunnels (slipnet:// for SlipNet app)
@@ -3499,6 +4869,10 @@ do_add_domain() {
         slipnet_url=$(generate_slipnet_url "dnstt" "d" "$DNSTT_PUBKEY" "" "" "$s_user" "$s_pass")
         echo -e "  ${GREEN}${dnstt_tag}:${NC}     ${slipnet_url}"
     fi
+    if [[ -n "${NOIZDNS_PUBKEY:-}" ]]; then
+        slipnet_url=$(generate_slipnet_url "sayedns" "n" "$NOIZDNS_PUBKEY" "" "" "$s_user" "$s_pass")
+        echo -e "  ${GREEN}${noiz_tag}:${NC}      ${slipnet_url}"
+    fi
 
     # Ask user for SSH credentials to generate SSH tunnel URLs
     echo ""
@@ -3511,9 +4885,24 @@ do_add_domain() {
         elif [[ -n "$ssh_tun_user" && -n "$ssh_tun_pass" ]]; then
             slipnet_url=$(generate_slipnet_url "slipstream_ssh" "s" "" "$ssh_tun_user" "$ssh_tun_pass" "$s_user" "$s_pass")
             echo -e "  ${GREEN}${slip_ssh_tag}:${NC}  ${slipnet_url}"
-            if [[ -n "$DNSTT_PUBKEY" ]]; then
-                slipnet_url=$(generate_slipnet_url "dnstt_ssh" "ds" "$DNSTT_PUBKEY" "$ssh_tun_user" "$ssh_tun_pass" "$s_user" "$s_pass")
+            # dnstt-ssh has its own keypair — read from its own tunnel dir
+            local _dnstt_ssh_pk=""
+            if [[ -f "/etc/dnstm/tunnels/${dnstt_ssh_tag}/server.pub" ]]; then
+                _dnstt_ssh_pk=$(cat "/etc/dnstm/tunnels/${dnstt_ssh_tag}/server.pub" 2>/dev/null || true)
+            fi
+            if [[ -n "$_dnstt_ssh_pk" ]]; then
+                slipnet_url=$(generate_slipnet_url "dnstt_ssh" "ds" "$_dnstt_ssh_pk" "$ssh_tun_user" "$ssh_tun_pass" "$s_user" "$s_pass")
                 echo -e "  ${GREEN}${dnstt_ssh_tag}:${NC} ${slipnet_url}"
+            fi
+            if [[ -n "${NOIZDNS_PUBKEY:-}" && -n "${noiz_ssh_tag:-}" ]]; then
+                local _noiz_ssh_pk2=""
+                if [[ -f "/etc/dnstm/tunnels/${noiz_ssh_tag}/server.pub" ]]; then
+                    _noiz_ssh_pk2=$(cat "/etc/dnstm/tunnels/${noiz_ssh_tag}/server.pub" 2>/dev/null || true)
+                fi
+                if [[ -n "$_noiz_ssh_pk2" ]]; then
+                    slipnet_url=$(generate_slipnet_url "sayedns_ssh" "z" "$_noiz_ssh_pk2" "$ssh_tun_user" "$ssh_tun_pass" "$s_user" "$s_pass")
+                    echo -e "  ${GREEN}${noiz_ssh_tag}:${NC} ${slipnet_url}"
+                fi
             fi
         else
             echo -e "  ${DIM}Skipped — username or password was empty.${NC}"
@@ -3529,6 +4918,7 @@ do_add_domain() {
 
 ADD_DOMAIN_MODE=false
 ADD_DOMAIN_ARG=""
+ADD_XRAY_MODE=false
 HARDEN_ONLY_MODE=false
 MANAGE_USERS_MODE=false
 DNSTT_MTU=1232
@@ -3567,6 +4957,10 @@ while [[ $# -gt 0 ]]; do
         --add-tunnel)
             do_add_tunnel
             exit 0
+            ;;
+        --add-xray)
+            ADD_XRAY_MODE=true
+            shift
             ;;
         --add-domain)
             ADD_DOMAIN_MODE=true
@@ -3607,10 +5001,11 @@ done
 
 mode_count=0
 [[ "$ADD_DOMAIN_MODE" == true ]] && ((mode_count++)) || true
+[[ "$ADD_XRAY_MODE" == true ]] && ((mode_count++)) || true
 [[ "$HARDEN_ONLY_MODE" == true ]] && ((mode_count++)) || true
 [[ "$MANAGE_USERS_MODE" == true ]] && ((mode_count++)) || true
 if [[ $mode_count -gt 1 ]]; then
-    echo "Error: --add-domain, --harden, and --users cannot be combined."
+    echo "Error: --add-domain, --add-xray, --harden, and --users cannot be combined."
     exit 1
 fi
 
@@ -3639,6 +5034,8 @@ if [[ "$HARDEN_ONLY_MODE" == true ]]; then
     do_harden
 elif [[ "$ADD_DOMAIN_MODE" == true ]]; then
     do_add_domain
+elif [[ "$ADD_XRAY_MODE" == true ]]; then
+    do_add_xray
 elif [[ "$MANAGE_USERS_MODE" == true ]]; then
     do_manage_users
 else

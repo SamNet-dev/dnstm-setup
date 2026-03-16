@@ -2,12 +2,13 @@
 
 > **Interactive DNS Tunnel Setup Wizard** — automated server deployment for unrestricted internet access.
 
-Deploys [dnstm](https://github.com/net2share/dnstm) DNS tunnel servers with **Slipstream** and **DNSTT** protocols. Designed to help people in restricted regions stay connected to the free internet.
+Deploys [dnstm](https://github.com/net2share/dnstm) DNS tunnel servers with **Slipstream**, **DNSTT**, and **NoizDNS** protocols. Designed to help people in restricted regions stay connected to the free internet.
 
 ---
 
 ## 📑 Table of Contents
 
+- [🆕 What's New in v1.3](#-whats-new-in-v13)
 - [🔍 How DNS Tunneling Works](#-how-dns-tunneling-works)
 - [🏗️ Architecture](#️-architecture)
 - [📦 What Gets Installed](#-what-gets-installed)
@@ -21,6 +22,7 @@ Deploys [dnstm](https://github.com/net2share/dnstm) DNS tunnel servers with **Sl
 - [🛠️ Management Commands](#️-management-commands)
 - [👤 SSH Tunnel User Management](#-ssh-tunnel-user-management)
 - [🔐 SOCKS Proxy Authentication](#-socks-proxy-authentication)
+- [🔌 Xray Backend Integration](#-xray-backend-integration)
 - [🗑️ Uninstall](#️-uninstall)
 - [📖 Manual Setup Guide](#-manual-setup-guide)
 - [🔧 Troubleshooting](#-troubleshooting)
@@ -30,6 +32,38 @@ Deploys [dnstm](https://github.com/net2share/dnstm) DNS tunnel servers with **Sl
 - [📄 License](#-license)
 - [👤 Author](#-author)
 - [📖 راهنمای فارسی](#-راهنمای-فارسی)
+
+---
+
+## 🆕 What's New in v1.3
+
+### 🛡️ NoizDNS Tunnels (DPI-Resistant)
+
+Two new tunnel types added to the main setup — **NoizDNS + SOCKS** (`n` subdomain) and **NoizDNS + SSH** (`z` subdomain). NoizDNS is a [DPI-resistant fork of DNSTT](https://github.com/anonvector/noizdns-deploy) by anonvector (same author as SlipNet) that uses alternative DNS query encoding to evade Deep Packet Inspection. The server auto-detects both standard DNSTT and NoizDNS clients, so existing setups keep working.
+
+- **6 tunnels** instead of 4 (Slipstream + DNSTT + NoizDNS, each with SOCKS and SSH backends)
+- **Zero extra configuration** — NoizDNS binary is downloaded automatically during setup
+- **Graceful degradation** — if the download fails, the script creates the standard 4 tunnels and continues
+- **In SlipNet**, select **NoizDNS** as the tunnel type for `n` and `z` subdomains
+
+### 🔌 Xray Backend Integration (Optional)
+
+New optional feature to connect an existing **3x-ui panel** (or raw Xray) to a DNS tunnel. Accessible via `--add-xray` or management menu option 8. This gives users modern proxy protocols tunneled through DNS:
+
+- **Auto-detects** 3x-ui (native or Docker) — or **installs it for you** (full panel or headless mode)
+- **4 protocols**: VLESS, Shadowsocks (chacha20-ietf-poly1305), VMess, Trojan
+- **Internal-only inbound** on `127.0.0.1` — not exposed to the internet, only reachable through the DNSTT tunnel
+- **Generates client configs** — SlipNet URL for the tunnel + client URI for Nekobox/v2rayNG
+- **Compatible with any V2Ray client** that supports proxy chaining (Nekobox, v2rayNG, Shadowrocket, Clash, etc.)
+
+### Other Improvements
+
+- **7 DNS records** (was 5) — 2 new NS records for NoizDNS subdomains (`n`, `z`)
+- **`--add-domain`** now creates NoizDNS tunnels for backup domains too
+- **`--status`** displays NoizDNS tunnel info and SlipNet URLs
+- **`--remove-tunnel`** properly cleans up Xray and NoizDNS service overrides
+- **Security hardening** — SQL injection prevention, cookie jar cleanup, restrictive file permissions, URL-safe base64 encoding
+- **Portable code** — no `grep -P` (Perl regex), no `python3` dependency, pure bash URL encoding
 
 ---
 
@@ -77,7 +111,16 @@ Because the traffic looks like ordinary DNS resolution, it passes through filter
      |                    (QUIC + TLS)   (port forwarding)
      |
      +---> ds.domain --> DNSTT --------> SSH Tunnel ------------> 🌐 Internet
-                          (Noise + Curve25519) (port forwarding)
+     |                    (Noise + Curve25519) (port forwarding)
+     |
+     +---> n.domain ---> NoizDNS ------> microsocks (SOCKS5) ---> 🌐 Internet
+     |                    (DPI-resistant DNSTT fork)
+     |
+     +---> z.domain ---> NoizDNS ------> SSH Tunnel ------------> 🌐 Internet
+     |                    (DPI-resistant)   (port forwarding)
+     |
+     +---> x.domain ---> DNSTT --------> Xray (VLESS/SS/VMess/Trojan) -> 🌐 Internet
+                          (Noise + Curve25519) (optional, via --add-xray)
 ```
 
 ### 🔗 How DNS Delegation Works
@@ -103,21 +146,26 @@ When someone queries `t.yourdomain.com`, the global DNS system follows this chai
 | 🔀 **DNS Router** | Port 53 multiplexer | Inspects incoming DNS queries and routes them to the correct tunnel by subdomain |
 | ⚡ **Slipstream Server** | QUIC-based DNS tunnel | TLS encryption with self-signed certificates — Speed: **~63 KB/s** |
 | 🔐 **DNSTT Server** | Classic DNS tunnel | Noise protocol with Curve25519 key pairs — Speed: **~42 KB/s** |
+| 🛡️ **NoizDNS Server** | DPI-resistant DNS tunnel | Modified DNSTT fork with enhanced query encoding to evade Deep Packet Inspection — Speed: **~42 KB/s** |
 | 🧦 **microsocks** | SOCKS5 proxy | Lightweight proxy shared by all tunnels (port auto-assigned by dnstm) |
 | 👤 **sshtun-user** | SSH user manager | *(Optional)* Creates restricted users that can only do port forwarding |
 
-### 🚇 Four Tunnel Types
+### 🚇 Six Tunnel Types
 
 | Tunnel | Subdomain | Transport | Backend | Use Case |
 |---|---|---|---|---|
 | ⚡ **slip1** | `t.domain` | Slipstream (QUIC) | SOCKS | Fastest — recommended for most users |
 | 🔐 **dnstt1** | `d.domain` | DNSTT (Noise) | SOCKS | Fallback if Slipstream is blocked |
+| 🛡️ **noiz1** | `n.domain` | NoizDNS (DPI-resistant) | SOCKS | Best for heavy censorship / DPI environments |
 | 🔑 **slip-ssh** | `s.domain` | Slipstream (QUIC) | SSH | When you need per-user authentication |
 | 🔑 **dnstt-ssh** | `ds.domain` | DNSTT (Noise) | SSH | SSH fallback if Slipstream is blocked |
+| 🛡️ **noiz-ssh** | `z.domain` | NoizDNS (DPI-resistant) | SSH | DPI-resistant SSH tunnel |
 
 > 🧦 **SOCKS backend:** Optionally secured with SOCKS5 username/password authentication. Without auth, anyone who knows the domain can connect.
 >
 > 🔑 **SSH backend:** Requires username + password. Provides per-user access control. The SSH user is restricted — even if credentials leak, no one can access your server.
+>
+> 🛡️ **NoizDNS:** A DPI-resistant fork of DNSTT by [anonvector](https://github.com/anonvector) (same author as SlipNet). Uses alternative DNS query encoding designed to evade Deep Packet Inspection systems in heavily censored networks. The server auto-detects both standard DNSTT and NoizDNS clients. In SlipNet, select **NoizDNS** as the tunnel type for `n` and `z` subdomains.
 
 ---
 
@@ -190,7 +238,7 @@ The wizard has **12 steps**. Here's what each one does:
 <summary><b>Step 3 — 📝 DNS Records (Cloudflare)</b></summary>
 
 - Shows you exactly which DNS records to create in Cloudflare
-- Displays a formatted box with all 5 records (1 A + 4 NS)
+- Displays a formatted box with all 7 records (1 A + 6 NS)
 - Explains why "DNS Only" (grey cloud) is required
 - Waits for your confirmation before proceeding
 </details>
@@ -313,16 +361,18 @@ Create these records in your **Cloudflare** dashboard:
 
 > ☝️ This tells the internet: *"ns.yourdomain.com is at this IP address."*
 
-### Records 2-5 — NS Records (Delegation)
+### Records 2-7 — NS Records (Delegation)
 
-| Type | Name | Target |
-|---|---|---|
-| `NS` | `t` | `ns.yourdomain.com` |
-| `NS` | `d` | `ns.yourdomain.com` |
-| `NS` | `s` | `ns.yourdomain.com` |
-| `NS` | `ds` | `ns.yourdomain.com` |
+| Type | Name | Target | Tunnel |
+|---|---|---|---|
+| `NS` | `t` | `ns.yourdomain.com` | Slipstream + SOCKS |
+| `NS` | `d` | `ns.yourdomain.com` | DNSTT + SOCKS |
+| `NS` | `n` | `ns.yourdomain.com` | NoizDNS + SOCKS (DPI-resistant) |
+| `NS` | `s` | `ns.yourdomain.com` | Slipstream + SSH |
+| `NS` | `ds` | `ns.yourdomain.com` | DNSTT + SSH |
+| `NS` | `z` | `ns.yourdomain.com` | NoizDNS + SSH (DPI-resistant) |
 
-> ☝️ These tell the internet: *"For queries about t/d/s/ds.yourdomain.com, ask ns.yourdomain.com (your server)."*
+> ☝️ These tell the internet: *"For queries about t/d/n/s/ds/z.yourdomain.com, ask ns.yourdomain.com (your server)."*
 
 ### ⚠️ Common Mistakes
 
@@ -352,6 +402,12 @@ sudo bash dnstm-setup.sh --add-domain --mtu 1200
 
 # 🚇 Add a single tunnel (interactive)
 sudo bash dnstm-setup.sh --add-tunnel
+
+# 🔌 Connect existing Xray panel (3x-ui) via DNS tunnel
+sudo bash dnstm-setup.sh --add-xray
+
+# 🔒 Apply security hardening to all services
+sudo bash dnstm-setup.sh --harden
 
 # ❌ Remove a specific tunnel (interactive picker)
 sudo bash dnstm-setup.sh --remove-tunnel
@@ -483,6 +539,9 @@ sudo bash dnstm-setup.sh --status
 # 🚇 Add a single tunnel (interactive — pick transport, backend, domain, tag)
 sudo bash dnstm-setup.sh --add-tunnel
 
+# 🔌 Add Xray backend (connect existing 3x-ui panel via DNS tunnel)
+sudo bash dnstm-setup.sh --add-xray
+
 # ❌ Remove a specific tunnel (interactive picker or pass tag directly)
 sudo bash dnstm-setup.sh --remove-tunnel
 sudo bash dnstm-setup.sh --remove-tunnel slip1
@@ -584,6 +643,186 @@ sudo dnstm backend auth -t socks --disable
 
 ---
 
+## 🔌 Xray Backend Integration
+
+> **Optional feature** — connect an existing Xray panel (3x-ui) to a DNSTT tunnel for modern proxy protocol support.
+
+If you already have a [3x-ui](https://github.com/mhsanaei/3x-ui) panel running on your server, this feature lets you route DNS tunnel traffic through Xray. Instead of the default microsocks (SOCKS5) backend, users get access to **VLESS, Shadowsocks, VMess, or Trojan** protocols — all tunneled through DNS.
+
+### How It Works
+
+```
+  📱 Phone
+     |
+     +-- SlipNet app -------> DNSTT tunnel (DNS queries on port 53)
+     |   (transport layer)        |
+     |                            v
+     +-- Nekobox/v2rayNG --> 🖥️ Server: DNSTT decodes traffic
+         (proxy protocol)        |
+                                 v
+                            Xray inbound (127.0.0.1 only)
+                                 |
+                                 v
+                            🌐 Free Internet
+```
+
+**Key points:**
+- **SlipNet** handles the DNSTT tunnel (transport — how traffic reaches the server through DNS)
+- **Nekobox/v2rayNG** handles the proxy protocol (VLESS/SS/VMess/Trojan — what runs inside the tunnel)
+- The Xray inbound listens on `127.0.0.1` only — it is **not exposed** to the internet, only reachable through the DNSTT tunnel
+- Your existing 3x-ui panel manages the inbound — you can see it in the dashboard
+
+### Supported Protocols
+
+| Protocol | Description |
+|---|---|
+| **VLESS** | Lightweight, recommended — minimal overhead |
+| **Shadowsocks** | Widely supported, uses chacha20-ietf-poly1305 |
+| **VMess** | Original V2Ray protocol |
+| **Trojan** | HTTPS-like traffic pattern |
+
+### Usage
+
+**Via CLI:**
+
+```bash
+# Add Xray backend (auto-detects 3x-ui, creates inbound + DNSTT tunnel)
+sudo bash dnstm-setup.sh --add-xray
+
+# Optionally set DNSTT MTU (works in any order)
+sudo bash dnstm-setup.sh --add-xray --mtu 1100
+sudo bash dnstm-setup.sh --mtu 1100 --add-xray
+```
+
+**Via Management Menu:**
+
+```bash
+sudo bash dnstm-setup.sh --manage
+# Select option 8 → Xray backend
+```
+
+### What the Script Does
+
+1. **Auto-detects** Xray installation (3x-ui panel or raw Xray binary)
+2. **If not found, offers to install:**
+   - **Full panel (3x-ui)** — web dashboard with user management, traffic stats, custom admin credentials and port
+   - **Headless (Xray only)** — lightweight, no web panel, config.json managed directly
+3. **Reads/sets credentials** for the panel (or generates them for headless mode)
+4. **Creates a new inbound** on 127.0.0.1 (your chosen protocol: VLESS/SS/VMess/Trojan)
+5. **Creates a DNSTT tunnel** with subdomain `x.yourdomain.com`
+6. **Overrides the tunnel upstream** to point at the Xray inbound (instead of microsocks)
+7. **Generates** a SlipNet URL (for the tunnel) and a client URI (for the proxy protocol)
+
+### Installation Modes
+
+| Mode | What you get | Best for |
+|---|---|---|
+| **Full panel (3x-ui)** | Web dashboard, user management, traffic stats, data limits, expiry dates | Managing multiple users |
+| **Headless (Xray only)** | Xray binary + config.json, no web UI, minimal resource usage | Single user, low-resource VPS |
+
+When installing 3x-ui, you choose:
+- **Admin username** (default: `admin`)
+- **Admin password** (default: `password`)
+- **Panel web port** (default: `2053`)
+
+### Required DNS Record
+
+After running `--add-xray`, add this record in Cloudflare:
+
+| Type | Name | Value | Proxy |
+|---|---|---|---|
+| **NS** | `x` | `ns.yourdomain.com` | OFF (grey cloud) |
+
+> This delegates `x.yourdomain.com` to your server, just like the other tunnel subdomains.
+
+### Removing an Xray Tunnel
+
+```bash
+sudo bash dnstm-setup.sh --remove-tunnel xray1
+```
+
+This removes the DNSTT tunnel, the systemd service override, and the tunnel config file. The Xray inbound itself is **not** removed automatically:
+- **Panel mode (3x-ui):** Delete the inbound from the 3x-ui web dashboard
+- **Headless mode:** Edit `/usr/local/etc/xray/config.json` and remove the inbound entry manually
+
+### Prerequisites
+
+- **dnstm-setup** must be already configured (run the full setup first)
+- `curl` and `jq` are required (`jq` is auto-installed if missing)
+- **3x-ui is optional** — if not installed, the script offers to install it for you (full panel or headless)
+
+<details>
+<summary><b>📱 Client Setup Guide (SlipNet + Nekobox)</b></summary>
+
+### Step-by-Step Client Configuration
+
+After running `--add-xray`, the script outputs two URLs:
+
+1. **SlipNet URL** (`slipnet://...`) — configures the DNSTT tunnel
+2. **Client URI** (`vless://...` / `ss://...` / etc.) — configures the proxy protocol
+
+#### Step 1: Import the DNSTT tunnel into SlipNet
+
+1. Open **SlipNet** on your Android phone
+2. Copy the `slipnet://` URL from the setup output
+3. Tap **Import from clipboard** in SlipNet (or open the URL directly — it auto-imports)
+4. The tunnel profile is created automatically
+
+#### Step 2: Enable Proxy Only Mode in SlipNet
+
+1. In SlipNet, go to the imported profile's settings
+2. Enable **"Proxy Only Mode"**
+3. This exposes a local SOCKS proxy on `127.0.0.1:1080`
+4. SlipNet now acts as a pure tunnel — it does NOT proxy your traffic directly
+
+#### Step 3: Add the Xray proxy in Nekobox (or v2rayNG)
+
+1. Open **Nekobox** (or any V2Ray-compatible app)
+2. Tap **Add proxy** → **Import from clipboard**
+3. Paste the client URI (`vless://...`, `ss://...`, `vmess://...`, or `trojan://...`)
+4. The proxy config is created with `127.0.0.1` as the address and the Xray inbound port
+
+#### Step 4: Chain Nekobox through SlipNet
+
+1. In Nekobox, go to the proxy settings
+2. Set **Outbound proxy** (or "chain") to use `SOCKS5` at `127.0.0.1:1080`
+3. This routes all Nekobox traffic through SlipNet's DNSTT tunnel
+
+#### Step 5: Enable UDP over TCP
+
+1. In both SlipNet and Nekobox, find the **UDP over TCP** option
+2. Enable it in both apps
+3. This wraps UDP traffic (DNS, etc.) into TCP before entering the tunnel, improving stability
+
+#### Step 6: Bypass SlipNet from Nekobox routing
+
+1. In Nekobox, go to **Route settings** → **App routing**
+2. Add **SlipNet** to the bypass/direct list
+3. This prevents a routing loop (Nekobox trying to send SlipNet's own traffic through SlipNet)
+
+#### Compatible Client Apps
+
+Any V2Ray/Xray-compatible app that supports proxy chaining works:
+
+| Platform | App | Proxy Chain Support |
+|---|---|---|
+| Android | **Nekobox** | Yes |
+| Android | **v2rayNG** | Yes (custom routing) |
+| Android | **Hiddify** | Yes |
+| Android | **Clash Meta** | Yes |
+| iOS | **Shadowrocket** | Yes |
+| iOS | **Stash** | Yes |
+| iOS | **V2Box** | Yes |
+| Desktop | **Nekoray** | Yes |
+| Desktop | **v2rayN** | Yes |
+| Desktop | **Clash Verge** | Yes |
+
+> **Note:** The generated client URIs (`vless://`, `ss://`, `vmess://`, `trojan://`) use standard formats compatible with all these apps. The address in the URI is `127.0.0.1` because the client connects through the DNSTT tunnel, not directly to the server.
+
+</details>
+
+---
+
 ## 🗑️ Uninstall
 
 To remove everything installed by this script:
@@ -594,11 +833,15 @@ sudo bash dnstm-setup.sh --uninstall
 
 **Removes:**
 - ✅ All dnstm tunnels and the DNS Router
-- ✅ dnstm binary and `/etc/dnstm` configuration
+- ✅ dnstm binary and `/etc/dnstm` configuration (including Xray tunnel configs)
 - ✅ sshtun-user binary (if installed)
 - ✅ microsocks service
+- ✅ Xray and NoizDNS systemd service overrides
+- ✅ NoizDNS server binary
 
 **Not removed** (must be done manually):
+- ⚠️ Xray/3x-ui panel — only DNSTT tunnel configs are cleaned up, the panel is untouched
+- ⚠️ Xray inbounds created via `--add-xray` — remove them from the 3x-ui dashboard
 - ⚠️ DNS records in Cloudflare — delete them from your dashboard
 - ⚠️ systemd-resolved — re-enable with:
   ```bash
@@ -783,8 +1026,12 @@ Made By **SamNet Technologies** — Saman
      |
      +---> t.domain  ---> Slipstream ---> microsocks (SOCKS5) ---> 🌐 اینترنت
      +---> d.domain  ---> DNSTT --------> microsocks (SOCKS5) ---> 🌐 اینترنت
+     +---> n.domain  ---> NoizDNS ------> microsocks (SOCKS5) ---> 🌐 اینترنت (مقاوم DPI)
      +---> s.domain  ---> Slip+SSH -----> تانل SSH --------------> 🌐 اینترنت
      +---> ds.domain --> DNSTT+SSH ----> تانل SSH --------------> 🌐 اینترنت
+     +---> z.domain  ---> NoizDNS+SSH --> تانل SSH --------------> 🌐 اینترنت (مقاوم DPI)
+     +---> x.domain  ---> DNSTT --------> Xray (VLESS/SS/VMess/Trojan) -> 🌐 اینترنت
+                          (اختیاری، با --add-xray)
 ```
 
 <div dir="rtl">
@@ -866,14 +1113,16 @@ sudo bash dnstm-setup.sh --users
 | IPv4 | آدرس IP سرور شما |
 | Proxy | **DNS Only** (ابر خاکستری ⚪ — نه نارنجی 🟠!) |
 
-### رکوردهای 2 تا 5 — NS Record
+### رکوردهای 2 تا 7 — NS Record
 
-| Type | Name | Target |
-|---|---|---|
-| `NS` | `t` | `ns.yourdomain.com` |
-| `NS` | `d` | `ns.yourdomain.com` |
-| `NS` | `s` | `ns.yourdomain.com` |
-| `NS` | `ds` | `ns.yourdomain.com` |
+| Type | Name | Target | تانل |
+|---|---|---|---|
+| `NS` | `t` | `ns.yourdomain.com` | Slipstream + SOCKS |
+| `NS` | `d` | `ns.yourdomain.com` | DNSTT + SOCKS |
+| `NS` | `n` | `ns.yourdomain.com` | NoizDNS + SOCKS (مقاوم DPI) |
+| `NS` | `s` | `ns.yourdomain.com` | Slipstream + SSH |
+| `NS` | `ds` | `ns.yourdomain.com` | DNSTT + SSH |
+| `NS` | `z` | `ns.yourdomain.com` | NoizDNS + SSH (مقاوم DPI) |
 
 ### ⚠️ اشتباهات رایج
 
@@ -905,14 +1154,16 @@ sudo bash dnstm-setup.sh --users
 
 ---
 
-## 🚇 چهار نوع تانل
+## 🚇 شش نوع تانل
 
 | تانل | ساب‌دامین | پروتکل | سرعت | توضیح |
 |---|---|---|---|---|
 | ⚡ **Slipstream + SOCKS** | `t` | QUIC + TLS | ~63 KB/s | سریع‌ترین — پیشنهادی برای اکثر کاربران |
 | 🔐 **DNSTT + SOCKS** | `d` | Noise + Curve25519 | ~42 KB/s | جایگزین اگر Slipstream مسدود شود |
+| 🛡️ **NoizDNS + SOCKS** | `n` | NoizDNS (مقاوم DPI) | ~42 KB/s | بهترین برای محیط‌های سانسور شدید |
 | 🔑 **Slipstream + SSH** | `s` | QUIC + TLS + SSH | ~60 KB/s | نیاز به نام کاربری و رمز عبور |
 | 🔑 **DNSTT + SSH** | `ds` | Noise + Curve25519 + SSH | ~40 KB/s | جایگزین SSH اگر Slipstream مسدود شود |
+| 🛡️ **NoizDNS + SSH** | `z` | NoizDNS + SSH (مقاوم DPI) | ~40 KB/s | تانل SSH مقاوم در برابر DPI |
 
 > 🧦 **بک‌اند SOCKS:** امکان فعال‌سازی احراز هویت SOCKS5 با نام کاربری و رمز عبور. بدون احراز هویت، هر کسی که دامنه را بداند می‌تواند وصل شود.
 >
@@ -1002,6 +1253,9 @@ sudo bash dnstm-setup.sh --status
 
 # 🚇 افزودن یک تانل (تعاملی — انتخاب پروتکل، بک‌اند، دامنه)
 sudo bash dnstm-setup.sh --add-tunnel
+
+# 🔌 اتصال پنل Xray (3x-ui) به تانل DNS (اختیاری)
+sudo bash dnstm-setup.sh --add-xray
 
 # ❌ حذف یک تانل خاص (تعاملی یا مستقیم)
 sudo bash dnstm-setup.sh --remove-tunnel
@@ -1122,9 +1376,11 @@ sudo bash dnstm-setup.sh --uninstall
 
 <div dir="rtl">
 
-این دستور تمام اجزا (تانل‌ها، روتر، dnstm، microsocks، sshtun-user) را حذف می‌کند.
+این دستور تمام اجزا (تانل‌ها، روتر، dnstm، microsocks، sshtun-user، تنظیمات Xray) را حذف می‌کند.
 
 **حذف نمی‌شود (دستی انجام دهید):**
+- ⚠️ پنل Xray/3x-ui — فقط تنظیمات تانل DNS حذف می‌شوند، خود پنل باقی می‌ماند
+- ⚠️ اینباندهای ساخته شده با `--add-xray` — از داشبورد 3x-ui حذف کنید
 - ⚠️ رکوردهای DNS در Cloudflare — از داشبورد حذف کنید
 - ⚠️ systemd-resolved — برای فعال‌سازی مجدد:
 
