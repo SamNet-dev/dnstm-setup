@@ -1635,6 +1635,8 @@ do_add_tunnel() {
             slipstream) slipnet_type="ss" ;;
             dnstt) slipnet_type="dnstt" ;;
         esac
+        # NoizDNS tunnels use dnstt transport but need sayedns type for SlipNet
+        [[ "$tag" == noiz* ]] && slipnet_type="sayedns"
 
         DOMAIN="$base_domain"
         local slipnet_url
@@ -2739,7 +2741,8 @@ save_xray_config() {
 # ─── NoizDNS Service Override ─────────────────────────────────────────────────
 
 # Override a DNSTT tunnel's systemd service to use the NoizDNS binary instead.
-# Only swaps the binary path, keeps the same upstream/flags/keys.
+# NoizDNS does NOT support -udp flag — it uses Pluggable Transport (PT) mode
+# with TOR_PT_* environment variables for bind address and upstream.
 # Usage: create_noizdns_service_override <tag>
 create_noizdns_service_override() {
     local tag="$1"
@@ -2747,7 +2750,7 @@ create_noizdns_service_override() {
     local dropin_dir="/etc/systemd/system/${service}.d"
     local dropin_file="${dropin_dir}/10-noizdns-binary.conf"
 
-    # Read original ExecStart
+    # Read original ExecStart to extract port, key, MTU, domain, upstream
     local orig_exec
     orig_exec=$(systemctl cat "$service" 2>/dev/null | grep '^ExecStart=/' | head -1 || true)
     if [[ -z "$orig_exec" ]]; then
@@ -2758,20 +2761,58 @@ create_noizdns_service_override() {
         return 1
     fi
 
-    # Replace the dnstt-server binary path with noizdns-server, keep everything else
-    local new_exec
-    new_exec=$(echo "$orig_exec" | sed 's|ExecStart=[^ ]*/dnstt-server|ExecStart=/usr/local/bin/noizdns-server|')
+    # Extract components from original ExecStart
+    # Original: /path/dnstt-server -udp :5300 -privkey-file KEY [-mtu MTU] DOMAIN UPSTREAM
+    local tunnel_port privkey_path mtu_val domain upstream
+
+    # Extract -udp port (e.g., ":5300" or "5300")
+    tunnel_port=$(echo "$orig_exec" | grep -oE '\-udp\s+:?[0-9]+' | grep -oE '[0-9]+' || true)
+    if [[ -z "$tunnel_port" ]]; then
+        print_fail "Could not detect tunnel port from ${service}"
+        return 1
+    fi
+
+    # Extract -privkey-file path
+    privkey_path=$(echo "$orig_exec" | grep -oE '\-privkey-file\s+[^ ]+' | sed 's/-privkey-file\s*//' || true)
+    if [[ -z "$privkey_path" ]]; then
+        privkey_path="/etc/dnstm/tunnels/${tag}/server.key"
+    fi
+
+    # Extract -mtu value (optional)
+    mtu_val=$(echo "$orig_exec" | grep -oE '\-mtu\s+[0-9]+' | grep -oE '[0-9]+' || true)
+    local mtu_arg=""
+    if [[ -n "$mtu_val" ]]; then
+        mtu_arg=" -mtu ${mtu_val}"
+    fi
+
+    # Extract domain and upstream (last two positional args)
+    # Strip all flags and their values, leaving just positional args
+    local positional
+    positional=$(echo "$orig_exec" | sed 's|^ExecStart=[^ ]*||; s|-udp\s\+:*[0-9]\+||; s|-privkey-file\s\+[^ ]\+||; s|-mtu\s\+[0-9]\+||' | xargs || true)
+    domain=$(echo "$positional" | awk '{print $1}')
+    upstream=$(echo "$positional" | awk '{print $2}')
+
+    if [[ -z "$domain" || -z "$upstream" ]]; then
+        print_fail "Could not parse domain/upstream from ${service}"
+        return 1
+    fi
 
     if ! mkdir -p "$dropin_dir" 2>/dev/null; then
         print_fail "Could not create drop-in directory: ${dropin_dir}"
         return 1
     fi
+
+    # Write PT-mode drop-in (NoizDNS uses TOR_PT_* env vars instead of -udp flag)
     cat > "$dropin_file" <<EOF || { print_fail "Could not write NoizDNS override: ${dropin_file}"; return 1; }
 [Service]
 ExecStart=
-${new_exec}
+ExecStart=/usr/local/bin/noizdns-server -privkey-file ${privkey_path}${mtu_arg} ${domain}
+Environment=TOR_PT_MANAGED_TRANSPORT_VER=1
+Environment=TOR_PT_SERVER_TRANSPORTS=dnstt
+Environment=TOR_PT_SERVER_BINDADDR=dnstt-0.0.0.0:${tunnel_port}
+Environment=TOR_PT_ORPORT=${upstream}
 EOF
-    print_ok "NoizDNS binary override: ${service}"
+    print_ok "NoizDNS binary override (PT mode): ${service}"
 }
 
 # Main Xray backend integration function
@@ -3558,7 +3599,16 @@ step_install_dnstm() {
     local noizdns_url="https://raw.githubusercontent.com/anonvector/noizdns-deploy/main/bin/dnstt-server-linux-${noizdns_arch}"
     if curl -fsSL -o /usr/local/bin/noizdns-server "$noizdns_url" 2>/dev/null; then
         chmod +x /usr/local/bin/noizdns-server
-        print_ok "NoizDNS server installed"
+        # Verify binary is real (not HTML error page, 0-byte, or wrong architecture)
+        if [[ ! -s /usr/local/bin/noizdns-server ]]; then
+            print_warn "NoizDNS binary is empty (download may have failed)"
+            rm -f /usr/local/bin/noizdns-server
+        elif timeout 3 /usr/local/bin/noizdns-server -help 2>&1 | grep -qi "usage\|flag\|dnstt\|privkey"; then
+            print_ok "NoizDNS server installed and verified"
+        else
+            print_warn "NoizDNS binary downloaded but may be corrupt or wrong architecture"
+            rm -f /usr/local/bin/noizdns-server
+        fi
     else
         print_warn "Could not download NoizDNS server (NoizDNS tunnels will be skipped)"
     fi
@@ -3761,6 +3811,12 @@ step_create_tunnels() {
         # Override binary to use noizdns-server
         create_noizdns_service_override "noiz-ssh" || print_warn "Could not set NoizDNS binary for noiz-ssh"
         echo ""
+
+        # Stop NoizDNS tunnels so step_start_services can start them fresh
+        # with the correct binary (dnstm tunnel add auto-starts with dnstt-server,
+        # but we need them to run noizdns-server via the drop-in override)
+        systemctl stop "dnstm-noiz1.service" 2>/dev/null || true
+        systemctl stop "dnstm-noiz-ssh.service" 2>/dev/null || true
     else
         echo ""
         print_warn "NoizDNS binary not available — skipping NoizDNS tunnels (n, z subdomains)"
@@ -4717,6 +4773,11 @@ do_add_domain() {
         fi
         create_noizdns_service_override "$noiz_ssh_tag" || print_warn "Could not set NoizDNS binary for ${noiz_ssh_tag}"
         echo ""
+
+        # Stop NoizDNS tunnels so they restart with the correct binary
+        # (dnstm tunnel add auto-starts with dnstt-server, not noizdns-server)
+        systemctl stop "dnstm-${noiz_tag}.service" 2>/dev/null || true
+        systemctl stop "dnstm-${noiz_ssh_tag}.service" 2>/dev/null || true
     fi
 
     print_ok "All tunnels created"
