@@ -2596,7 +2596,7 @@ create_xray_service_override() {
 
     # Extract the listening port (-udp :PORT part) — no Perl regex needed
     local tunnel_port
-    tunnel_port=$(echo "$orig_exec" | grep -oE '\-udp[[:space:]]+:?[0-9]+' | grep -oE '[0-9]+' || true)
+    tunnel_port=$(echo "$orig_exec" | grep -oE '\-udp[[:space:]]+[^ ]+' | grep -oE '[0-9]+$' || true)
     if [[ -z "$tunnel_port" ]]; then
         print_fail "Could not detect tunnel listening port from service"
         return 1
@@ -2772,7 +2772,7 @@ create_noizdns_service_override() {
     local tunnel_port privkey_path mtu_val domain upstream
 
     # Extract -udp port (e.g., ":5300" or "5300")
-    tunnel_port=$(echo "$orig_exec" | grep -oE '\-udp\s+:?[0-9]+' | grep -oE '[0-9]+' || true)
+    tunnel_port=$(echo "$orig_exec" | grep -oE '\-udp[[:space:]]+[^ ]+' | grep -oE '[0-9]+$' || true)
     if [[ -z "$tunnel_port" ]]; then
         print_fail "Could not detect tunnel port from ${service}"
         return 1
@@ -2794,7 +2794,7 @@ create_noizdns_service_override() {
     # Extract domain and upstream (last two positional args)
     # Strip all flags and their values, leaving just positional args
     local positional
-    positional=$(echo "$orig_exec" | sed 's|^ExecStart=[^ ]*||; s|-udp\s\+:*[0-9]\+||; s|-privkey-file\s\+[^ ]\+||; s|-mtu\s\+[0-9]\+||' | xargs || true)
+    positional=$(echo "$orig_exec" | sed 's|^ExecStart=[^ ]*||; s|-udp[[:space:]]*[^ ]*||; s|-privkey-file[[:space:]]*[^ ]*||; s|-mtu[[:space:]]*[0-9]*||' | xargs || true)
     domain=$(echo "$positional" | awk '{print $1}')
     upstream=$(echo "$positional" | awk '{print $2}')
 
