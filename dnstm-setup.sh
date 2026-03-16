@@ -3856,15 +3856,61 @@ step_start_services() {
     # Reload systemd to pick up any service overrides (e.g., NoizDNS binary swap)
     systemctl daemon-reload 2>/dev/null || true
 
-    # Only restart router if tunnels/install changed (avoid downtime on re-runs)
+    # ── 1. Start tunnels FIRST (before router) ──────────────────────────────────
+    # The DNS Router crash-loops if any configured backend tunnel isn't running.
+    # So we must start all tunnels and verify they're healthy BEFORE starting the router.
+
+    # Stop router while we start tunnels (it may be running from a previous install)
     if [[ "$TUNNELS_CHANGED" == "true" ]]; then
-        # Stop router first to ensure it picks up the new tunnel config
-        # (install may have started it before tunnels were created)
         print_info "Stopping DNS Router (to reload tunnel config)..."
         dnstm router stop 2>/dev/null || true
         sleep 1
+    fi
 
-        # Start router — this reads config.json which now has all tunnels
+    echo ""
+
+    # Start all tunnels
+    local all_tags
+    all_tags=$(dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
+    if [[ -z "$all_tags" ]]; then
+        all_tags="slip1 dnstt1 slip-ssh dnstt-ssh"
+        [[ -x /usr/local/bin/noizdns-server ]] && all_tags+=" noiz1 noiz-ssh"
+    fi
+    for tag in $all_tags; do
+        print_info "Starting tunnel: ${tag}..."
+        if dnstm tunnel start --tag "$tag" 2>/dev/null; then
+            print_ok "Started: ${tag}"
+        else
+            if dnstm tunnel list 2>/dev/null | awk -v t="tag=${tag}" '{for(i=1;i<=NF;i++) if($i==t){print;next}}' | grep -qi "running"; then
+                print_ok "Already running: ${tag}"
+            else
+                print_warn "Could not start: ${tag}. Check: dnstm tunnel logs --tag ${tag}"
+            fi
+        fi
+    done
+
+    # ── 2. Verify NoizDNS tunnels actually started ──────────────────────────────
+    # If NoizDNS services failed (wrong binary, bad config, etc.), remove them
+    # so the DNS Router doesn't crash-loop trying to connect to dead backends.
+    sleep 1
+    for noiz_tag in noiz1 noiz-ssh; do
+        if dnstm tunnel list 2>/dev/null | grep -q "tag=${noiz_tag}"; then
+            if ! systemctl is-active --quiet "dnstm-${noiz_tag}.service" 2>/dev/null; then
+                print_warn "NoizDNS tunnel ${noiz_tag} failed to start — removing to protect DNS Router"
+                dnstm tunnel stop --tag "$noiz_tag" 2>/dev/null || true
+                dnstm tunnel remove --tag "$noiz_tag" 2>/dev/null || true
+                rm -f "/etc/systemd/system/dnstm-${noiz_tag}.service.d/10-noizdns-binary.conf" 2>/dev/null || true
+                rmdir "/etc/systemd/system/dnstm-${noiz_tag}.service.d" 2>/dev/null || true
+                systemctl daemon-reload 2>/dev/null || true
+                print_info "Removed ${noiz_tag} — other tunnels will work normally"
+            fi
+        fi
+    done
+
+    echo ""
+
+    # ── 3. Start DNS Router (now that all healthy tunnels are running) ───────────
+    if [[ "$TUNNELS_CHANGED" == "true" ]]; then
         print_info "Starting DNS Router..."
         if dnstm router start 2>/dev/null; then
             print_ok "DNS Router started"
@@ -3909,28 +3955,6 @@ step_start_services() {
             fi
         fi
     fi
-
-    echo ""
-
-    # Start tunnels (discover all tags dynamically to support --add-domain tunnels)
-    local all_tags
-    all_tags=$(dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
-    if [[ -z "$all_tags" ]]; then
-        all_tags="slip1 dnstt1 slip-ssh dnstt-ssh"
-        [[ -x /usr/local/bin/noizdns-server ]] && all_tags+=" noiz1 noiz-ssh"
-    fi
-    for tag in $all_tags; do
-        print_info "Starting tunnel: ${tag}..."
-        if dnstm tunnel start --tag "$tag" 2>/dev/null; then
-            print_ok "Started: ${tag}"
-        else
-            if dnstm tunnel list 2>/dev/null | awk -v t="tag=${tag}" '{for(i=1;i<=NF;i++) if($i==t){print;next}}' | grep -qi "running"; then
-                print_ok "Already running: ${tag}"
-            else
-                print_warn "Could not start: ${tag}. Check: dnstm tunnel logs --tag ${tag}"
-            fi
-        fi
-    done
 
     echo ""
     print_info "Current tunnel status:"
@@ -4799,21 +4823,14 @@ do_add_domain() {
     echo ""
 
     # Reload systemd to pick up any service overrides (NoizDNS binary swap)
-    # Must happen BEFORE router restart to ensure overrides are active
     systemctl daemon-reload 2>/dev/null || true
 
-    # Restart router to pick up new tunnel config
-    print_info "Restarting DNS Router to load new tunnels..."
+    # Stop router while we start tunnels (router crash-loops if backends are dead)
+    print_info "Stopping DNS Router..."
     dnstm router stop 2>/dev/null || true
     sleep 1
-    if dnstm router start 2>/dev/null; then
-        print_ok "DNS Router restarted"
-    else
-        print_warn "DNS Router restart may have issues. Check: dnstm router logs"
-    fi
-    echo ""
 
-    # Start new tunnels (include NoizDNS if available)
+    # Start new tunnels FIRST (before router)
     local _start_tags="$slip_tag $dnstt_tag $slip_ssh_tag $dnstt_ssh_tag"
     if [[ -x /usr/local/bin/noizdns-server ]]; then
         _start_tags+=" ${noiz_tag:-} ${noiz_ssh_tag:-}"
@@ -4831,6 +4848,32 @@ do_add_domain() {
             fi
         fi
     done
+
+    # Verify NoizDNS tunnels started — remove dead ones to protect router
+    sleep 1
+    for _ntag in ${noiz_tag:-} ${noiz_ssh_tag:-}; do
+        [[ -z "$_ntag" ]] && continue
+        if dnstm tunnel list 2>/dev/null | grep -q "tag=${_ntag}"; then
+            if ! systemctl is-active --quiet "dnstm-${_ntag}.service" 2>/dev/null; then
+                print_warn "NoizDNS tunnel ${_ntag} failed to start — removing to protect DNS Router"
+                dnstm tunnel stop --tag "$_ntag" 2>/dev/null || true
+                dnstm tunnel remove --tag "$_ntag" 2>/dev/null || true
+                rm -f "/etc/systemd/system/dnstm-${_ntag}.service.d/10-noizdns-binary.conf" 2>/dev/null || true
+                rmdir "/etc/systemd/system/dnstm-${_ntag}.service.d" 2>/dev/null || true
+                systemctl daemon-reload 2>/dev/null || true
+                print_info "Removed ${_ntag} — other tunnels will work normally"
+            fi
+        fi
+    done
+
+    # NOW start the router (all backends are healthy)
+    echo ""
+    print_info "Starting DNS Router..."
+    if dnstm router start 2>/dev/null; then
+        print_ok "DNS Router restarted"
+    else
+        print_warn "DNS Router restart may have issues. Check: dnstm router logs"
+    fi
 
     echo ""
     print_info "All tunnels:"
