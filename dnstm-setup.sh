@@ -103,6 +103,50 @@ print_box() {
     echo -e "  ${DIM}└${line}┘${NC}"
 }
 
+# Check if a tunnel tag exists in dnstm tunnel list output.
+# Handles both `tag=name` and bare `name` formats in the output.
+# Usage: dnstm_tag_exists <tag>
+dnstm_tag_exists() {
+    local t="$1"
+    local output
+    output=$(dnstm tunnel list 2>/dev/null || true)
+    [[ -z "$output" ]] && return 1
+    # Try tag=name format first
+    if echo "$output" | grep -qwF "tag=${t}"; then
+        return 0
+    fi
+    # Fallback: check if the tag appears as a standalone word anywhere
+    if echo "$output" | grep -qwF "$t"; then
+        return 0
+    fi
+    return 1
+}
+
+# Extract all tunnel tags from dnstm tunnel list output.
+# Handles both `tag=name` and other formats.
+# Usage: tags=$(dnstm_get_tags)
+dnstm_get_tags() {
+    local output
+    output=$(dnstm tunnel list 2>/dev/null || true)
+    [[ -z "$output" ]] && return
+    # Try tag=name format first
+    local tags
+    tags=$(echo "$output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
+    if [[ -n "$tags" ]]; then
+        echo "$tags"
+        return
+    fi
+    # Fallback: extract known tag patterns (slip*, dnstt*, noiz*, xray*)
+    echo "$output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true
+}
+
+# Check if any tunnels exist
+dnstm_has_tunnels() {
+    local output
+    output=$(dnstm tunnel list 2>/dev/null || true)
+    [[ -n "$output" ]] && echo "$output" | grep -qiE 'tag=|slip|dnstt|noiz|xray'
+}
+
 prompt_yn() {
     local question="$1"
     local default="${2:-n}"
@@ -789,7 +833,11 @@ do_status() {
 
     # ─── Collect all tunnel tags and their domains ───
     local tags
-    tags=$(echo "$tunnel_list_output" | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
+    tags=$(echo "$tunnel_list_output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
+    # Fallback: extract known tag patterns if tag= format not found
+    if [[ -z "$tags" ]] && [[ -n "$tunnel_list_output" ]]; then
+        tags=$(echo "$tunnel_list_output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true)
+    fi
     if [[ -z "$tags" ]]; then
         print_warn "No tunnels found"
         return
@@ -856,7 +904,7 @@ do_status() {
     for tag in $tags; do
         # Extract domain for this tunnel from dnstm
         local tag_domain
-        tag_domain=$(echo "$tunnel_list_output" | awk -v t="tag=${tag}" '{for(i=1;i<=NF;i++) if($i==t){print;next}}' | grep -o 'domain=[^ ]*' | sed 's/domain=//' || true)
+        tag_domain=$(echo "$tunnel_list_output" | grep -wF "$tag" | grep -oE 'domain=[^ ]+' | head -1 | sed 's/domain=//' || true)
         if [[ -z "$tag_domain" ]]; then
             continue
         fi
@@ -1376,7 +1424,9 @@ do_change_mtu() {
     svc_files=$(find /etc/systemd/system -maxdepth 1 -name 'dnstm*.service' -o -name 'dnsrouter*.service' 2>/dev/null || true)
     # Also check for dnstm tunnel list tag-based discovery
     local all_tags
-    all_tags=$(echo "$tunnel_output" | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
+    all_tags=$(echo "$tunnel_output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
+    [[ -z "$all_tags" && -n "$tunnel_output" ]] && \
+        all_tags=$(echo "$tunnel_output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true)
 
     # Method 1: Find services containing dnstt-server in ExecStart
     for svc_file in $svc_files; do
@@ -1402,7 +1452,7 @@ do_change_mtu() {
             if [[ "$tag" == noiz* ]]; then
                 continue
             fi
-            if echo "$tunnel_output" | awk -v t="tag=${tag}" '{for(i=1;i<=NF;i++) if($i==t){print;next}}' | grep -qi "transport=dnstt"; then
+            if echo "$tunnel_output" | grep -wF "$tag" | grep -qi "transport=dnstt\|dnstt"; then
                 # Try common service name patterns
                 local found_svc=""
                 for pattern in "dnstm-tunnel-${tag}.service" "dnstm-${tag}.service"; do
@@ -1575,7 +1625,9 @@ do_remove_tunnel() {
     # If no tag given, ask interactively
     if [[ -z "$target_tag" ]]; then
         local tags
-        tags=$(echo "$tunnel_output" | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
+        tags=$(echo "$tunnel_output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
+        [[ -z "$tags" && -n "$tunnel_output" ]] && \
+            tags=$(echo "$tunnel_output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true)
         if [[ -z "$tags" ]]; then
             print_warn "No tunnels found."
             exit 0
@@ -1586,7 +1638,7 @@ do_remove_tunnel() {
         local tag_arr=()
         for tag in $tags; do
             local domain_info
-            domain_info=$(echo "$tunnel_output" | awk -v t="tag=${tag}" '{for(i=1;i<=NF;i++) if($i==t){print;next}}' | grep -o 'domain=[^ ]*' | sed 's/domain=//' || true)
+            domain_info=$(echo "$tunnel_output" | grep -wF "$tag" | grep -oE 'domain=[^ ]+' | head -1 | sed 's/domain=//' || true)
             echo -e "  ${BOLD}${i})${NC}  ${tag}  ${DIM}(${domain_info})${NC}"
             tag_arr+=("$tag")
             i=$((i + 1))
@@ -1609,16 +1661,20 @@ do_remove_tunnel() {
     fi
 
     # Verify tunnel exists
-    if ! echo "$tunnel_output" | grep -o 'tag=[^ ]*' | grep -qxF "tag=${target_tag}"; then
+    if ! echo "$tunnel_output" | grep -qwF "${target_tag}"; then
         print_fail "Tunnel '${target_tag}' not found."
         echo ""
         print_info "Available tunnels:"
-        echo "$tunnel_output" | grep -o 'tag=[^ ]*' | sed 's/tag=/  /' || true
+        local _avail_tags
+        _avail_tags=$(echo "$tunnel_output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
+        [[ -z "$_avail_tags" && -n "$tunnel_output" ]] && \
+            _avail_tags=$(echo "$tunnel_output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true)
+        echo "$_avail_tags" | sed 's/^/  /' || true
         exit 1
     fi
 
     local domain_info
-    domain_info=$(echo "$tunnel_output" | awk -v t="tag=${target_tag}" '{for(i=1;i<=NF;i++) if($i==t){print;next}}' | grep -o 'domain=[^ ]*' | sed 's/domain=//' || true)
+    domain_info=$(echo "$tunnel_output" | grep -wF "$target_tag" | grep -oE 'domain=[^ ]+' | head -1 | sed 's/domain=//' || true)
 
     echo ""
     if ! prompt_yn "Remove tunnel '${target_tag}' (${domain_info})?" "n"; then
@@ -1664,8 +1720,7 @@ do_remove_tunnel() {
 
     # Restart router only if tunnels remain
     local remaining
-    remaining=$(dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' || true)
-    if [[ -n "$remaining" ]]; then
+    if dnstm_has_tunnels; then
         print_info "Restarting DNS Router..."
         dnstm router stop 2>/dev/null || true
         sleep 1
@@ -1787,7 +1842,7 @@ do_add_tunnel() {
         exit 1
     fi
     # Check if tag already exists
-    if dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | grep -qxF "tag=${tag}"; then
+    if dnstm_tag_exists "$tag"; then
         print_fail "Tunnel with tag '${tag}' already exists. Choose a different tag."
         exit 1
     fi
@@ -1832,7 +1887,7 @@ do_add_tunnel() {
     create_output=$(dnstm tunnel add --transport "$transport" --backend "$backend" --domain "$domain" --tag "$tag" $mtu_flag 2>&1) || true
     echo "$create_output"
 
-    if dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | grep -qxF "tag=${tag}"; then
+    if dnstm_tag_exists "$tag"; then
         print_ok "Created: ${tag}"
     else
         print_fail "Tunnel creation may have failed. Check output above."
@@ -2070,7 +2125,7 @@ do_uninstall() {
     if command -v dnstm &>/dev/null; then
         print_info "Stopping tunnels..."
         local tags
-        tags=$(dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
+        tags=$(dnstm_get_tags)
         for tag in $tags; do
             dnstm tunnel stop --tag "$tag" 2>/dev/null && print_ok "Stopped tunnel: $tag" || true
         done
@@ -2324,7 +2379,10 @@ do_manage_users() {
                             local pubkey=""
                             # Find DNSTT pubkey for this domain
                             local dnstt_tag_name
-                            dnstt_tag_name=$(echo "$tunnel_domains" | grep "domain=d\.${dom}" | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
+                            dnstt_tag_name=$(echo "$tunnel_domains" | grep "domain=d\.${dom}" | grep -oE 'tag=[^ ]+' | head -1 | sed 's/tag=//' || true)
+                            # Fallback: try matching dnstt tag from the domain line
+                            [[ -z "$dnstt_tag_name" ]] && \
+                                dnstt_tag_name=$(echo "$tunnel_domains" | grep "d\.${dom}" | grep -oE '\bdnstt[a-z0-9_-]*' | head -1 || true)
                             if [[ -n "$dnstt_tag_name" && -f "/etc/dnstm/tunnels/${dnstt_tag_name}/server.pub" ]]; then
                                 pubkey=$(cat "/etc/dnstm/tunnels/${dnstt_tag_name}/server.pub" 2>/dev/null || true)
                             fi
@@ -2762,9 +2820,17 @@ detect_xray_panel() {
         if [[ -z "$XRAY_PANEL_BASEPATH" ]]; then
             # Some 3x-ui versions expose base path in config output
             local xui_config_output
-            xui_config_output=$(x-ui setting -show 2>/dev/null || true)
+            xui_config_output=$(/usr/local/x-ui/x-ui setting -show 2>/dev/null || x-ui setting -show 2>/dev/null || true)
             if [[ -n "$xui_config_output" ]]; then
                 XRAY_PANEL_BASEPATH=$(echo "$xui_config_output" | grep -i 'webBasePath\|basePath' | sed 's/.*:[[:space:]]*//' | head -1 || true)
+            fi
+        fi
+        # Method 4: Parse from running process cmdline or env
+        if [[ -z "$XRAY_PANEL_BASEPATH" ]]; then
+            local _xui_pid
+            _xui_pid=$(pgrep -x x-ui 2>/dev/null | head -1 || true)
+            if [[ -n "$_xui_pid" && -f "/proc/${_xui_pid}/environ" ]]; then
+                XRAY_PANEL_BASEPATH=$(tr '\0' '\n' < "/proc/${_xui_pid}/environ" 2>/dev/null | grep -i 'basepath\|base_path' | sed 's/.*=//' | head -1 || true)
             fi
         fi
         # Normalize: strip whitespace and leading/trailing slashes
@@ -2901,25 +2967,66 @@ create_3xui_inbound() {
     fi
 
     # Auto-detect panel URL: try http, then https, with and without base path
+    # Also try localhost in case 127.0.0.1 doesn't resolve (IPv6-only systems)
     print_info "Logging in to 3x-ui panel..."
+    if [[ -n "$base_segment" ]]; then
+        print_info "Detected web base path: ${base_segment}"
+    fi
     local panel_url=""
     local login_resp=""
     local try_urls=()
 
-    # Build list of URLs to try (with base path first, then without)
-    if [[ -n "$base_segment" ]]; then
-        try_urls+=("http://127.0.0.1:${XRAY_PANEL_PORT}${base_segment}")
-        try_urls+=("https://127.0.0.1:${XRAY_PANEL_PORT}${base_segment}")
+    # Build list of URLs to try — with base path, without, and also try
+    # /panel prefix (some 3x-ui versions use /{basepath}/panel/... routes)
+    local _addrs=("127.0.0.1" "localhost")
+    for _addr in "${_addrs[@]}"; do
+        if [[ -n "$base_segment" ]]; then
+            try_urls+=("http://${_addr}:${XRAY_PANEL_PORT}${base_segment}")
+            try_urls+=("https://${_addr}:${XRAY_PANEL_PORT}${base_segment}")
+        fi
+        try_urls+=("http://${_addr}:${XRAY_PANEL_PORT}")
+        try_urls+=("https://${_addr}:${XRAY_PANEL_PORT}")
+    done
+
+    # Wait for panel to become ready (it may have just been installed/restarted)
+    local _wait_attempts=0
+    while [[ $_wait_attempts -lt 5 ]]; do
+        if ss -tlnp 2>/dev/null | grep -q ":${XRAY_PANEL_PORT} "; then
+            break
+        fi
+        _wait_attempts=$((_wait_attempts + 1))
+        if [[ $_wait_attempts -eq 1 ]]; then
+            print_info "Waiting for panel to start on port ${XRAY_PANEL_PORT}..."
+        fi
+        [[ $_wait_attempts -lt 5 ]] && sleep 2
+    done
+
+    # Also detect actual listening port from x-ui process if our port doesn't match
+    if ! ss -tlnp 2>/dev/null | grep -q ":${XRAY_PANEL_PORT} "; then
+        local _actual_port
+        _actual_port=$(ss -tlnp 2>/dev/null | grep 'x-ui\|x\.ui' | grep -oE ':[0-9]+' | head -1 | tr -d ':' || true)
+        if [[ -n "$_actual_port" && "$_actual_port" != "$XRAY_PANEL_PORT" ]]; then
+            print_warn "Panel not on port ${XRAY_PANEL_PORT}, found on port ${_actual_port} — trying that"
+            XRAY_PANEL_PORT="$_actual_port"
+            # Rebuild URLs with correct port
+            try_urls=()
+            for _addr in "${_addrs[@]}"; do
+                if [[ -n "$base_segment" ]]; then
+                    try_urls+=("http://${_addr}:${XRAY_PANEL_PORT}${base_segment}")
+                    try_urls+=("https://${_addr}:${XRAY_PANEL_PORT}${base_segment}")
+                fi
+                try_urls+=("http://${_addr}:${XRAY_PANEL_PORT}")
+                try_urls+=("https://${_addr}:${XRAY_PANEL_PORT}")
+            done
+        fi
     fi
-    try_urls+=("http://127.0.0.1:${XRAY_PANEL_PORT}")
-    try_urls+=("https://127.0.0.1:${XRAY_PANEL_PORT}")
 
     for try_url in "${try_urls[@]}"; do
         login_resp=$(curl -s -L -k -c "$cookie_jar" -X POST "${try_url}/login" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "username=${XRAY_ADMIN_USER}" \
             --data-urlencode "password=${XRAY_ADMIN_PASS}" \
-            --max-time 5 2>/dev/null || true)
+            --connect-timeout 5 --max-time 10 2>/dev/null || true)
         # Only accept JSON responses (not HTML error pages or empty)
         if [[ -n "$login_resp" ]] && echo "$login_resp" | jq . &>/dev/null; then
             panel_url="$try_url"
@@ -2931,9 +3038,53 @@ create_3xui_inbound() {
 
     if [[ -z "$panel_url" ]]; then
         print_fail "Could not connect to 3x-ui panel on port ${XRAY_PANEL_PORT}"
-        print_info "Is the panel running? Check: systemctl status x-ui"
-        print_info "If your panel has a custom base path, check: sqlite3 /etc/x-ui/x-ui.db \"SELECT value FROM settings WHERE key='webBasePath'\""
-        return 1
+        # Show what's actually listening for debugging
+        local _listening
+        _listening=$(ss -tlnp 2>/dev/null | grep -i 'x-ui\|x\.ui' || true)
+        if [[ -n "$_listening" ]]; then
+            print_info "Panel process found but login failed:"
+            print_info "  ${_listening}"
+            # Diagnostic: probe the panel to find what's actually responding
+            local _diag_url _diag_resp _diag_err
+            for _diag_url in "https://127.0.0.1:${XRAY_PANEL_PORT}" "http://127.0.0.1:${XRAY_PANEL_PORT}"; do
+                _diag_err=$(curl -s -k --connect-timeout 3 --max-time 5 -o /dev/null -w "%{http_code}" "${_diag_url}/" 2>&1 || true)
+                if [[ "$_diag_err" =~ ^[0-9]+$ && "$_diag_err" != "000" ]]; then
+                    print_info "Panel responds on ${_diag_url} (HTTP ${_diag_err})"
+                    # Try to get the actual login page to see if base path redirect happens
+                    _diag_resp=$(curl -s -k -L --connect-timeout 3 --max-time 5 "${_diag_url}/" 2>/dev/null | head -c 500 || true)
+                    # Check if response contains a redirect to a base path
+                    local _detected_base
+                    _detected_base=$(echo "$_diag_resp" | grep -oE 'href="(/[^"]+)/"' | head -1 | sed 's/href="//;s/\/"$//' || true)
+                    if [[ -n "$_detected_base" && "$_detected_base" != "/" ]]; then
+                        print_info "Detected redirect to base path: ${_detected_base}"
+                        print_info "Retrying login with base path..."
+                        login_resp=$(curl -s -L -k -c "$cookie_jar" -X POST "${_diag_url}${_detected_base}/login" \
+                            -H "Content-Type: application/x-www-form-urlencoded" \
+                            --data-urlencode "username=${XRAY_ADMIN_USER}" \
+                            --data-urlencode "password=${XRAY_ADMIN_PASS}" \
+                            --connect-timeout 5 --max-time 10 2>/dev/null || true)
+                        if [[ -n "$login_resp" ]] && echo "$login_resp" | jq . &>/dev/null; then
+                            panel_url="${_diag_url}${_detected_base}"
+                            print_ok "Found panel at ${panel_url}"
+                            break
+                        fi
+                    fi
+                    break
+                fi
+            done
+        else
+            print_info "No x-ui process found listening on any port"
+            print_info "Try: systemctl restart x-ui && sleep 3 && sudo bash $0 --add-xray"
+        fi
+        # If diagnostic probe found the panel, continue; otherwise fail
+        if [[ -z "$panel_url" ]]; then
+            if [[ -n "$base_segment" ]]; then
+                print_info "Web base path '${base_segment}' was detected — verify it matches your panel"
+            fi
+            print_info "Check: systemctl status x-ui"
+            print_info "Debug: curl -k https://127.0.0.1:${XRAY_PANEL_PORT}/"
+            return 1
+        fi
     fi
 
     local login_success
@@ -2952,10 +3103,12 @@ create_3xui_inbound() {
     sniffing_settings='{"enabled":true,"destOverride":["http","tls","quic","fakedns"]}'
     stream_settings='{"network":"tcp","security":"none","tcpSettings":{"header":{"type":"none"}}}'
 
+    local client_email="dnstt-${XRAY_INBOUND_PORT}"
+
     case "$XRAY_PROTOCOL" in
         vless)
-            settings=$(jq -nc --arg uuid "$XRAY_UUID" '{
-                "clients": [{"id": $uuid, "flow": "", "email": "dnstt-user", "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true}],
+            settings=$(jq -nc --arg uuid "$XRAY_UUID" --arg email "$client_email" '{
+                "clients": [{"id": $uuid, "flow": "", "email": $email, "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true}],
                 "decryption": "none",
                 "fallbacks": []
             }')
@@ -2969,13 +3122,13 @@ create_3xui_inbound() {
             }')
             ;;
         vmess)
-            settings=$(jq -nc --arg uuid "$XRAY_UUID" '{
-                "clients": [{"id": $uuid, "alterId": 0, "email": "dnstt-user", "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true}]
+            settings=$(jq -nc --arg uuid "$XRAY_UUID" --arg email "$client_email" '{
+                "clients": [{"id": $uuid, "alterId": 0, "email": $email, "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true}]
             }')
             ;;
         trojan)
-            settings=$(jq -nc --arg pass "$XRAY_PASSWORD" '{
-                "clients": [{"password": $pass, "email": "dnstt-user", "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true}],
+            settings=$(jq -nc --arg pass "$XRAY_PASSWORD" --arg email "$client_email" '{
+                "clients": [{"password": $pass, "email": $email, "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true}],
                 "fallbacks": []
             }')
             ;;
@@ -3207,12 +3360,25 @@ save_xray_config() {
 # Download and verify the NoizDNS server binary if not already installed.
 # Returns 0 if binary is available (already existed or freshly downloaded), 1 otherwise.
 ensure_noizdns_binary() {
-    # Already installed and working
+    # Already installed — validate it's actually an ELF binary (not a corrupted download)
     if [[ -x /usr/local/bin/noizdns-server ]]; then
-        return 0
+        if file /usr/local/bin/noizdns-server 2>/dev/null | grep -qi "ELF"; then
+            return 0
+        fi
+        # Corrupted or invalid binary — remove and re-download
+        print_warn "Existing NoizDNS binary is invalid — re-downloading..."
+        rm -f /usr/local/bin/noizdns-server
     fi
 
     print_info "Downloading NoizDNS server (DPI-resistant tunnel)..."
+
+    # Quick DNS check — fail fast if DNS is broken instead of curl hanging
+    if ! curl -s --connect-timeout 5 --max-time 5 -o /dev/null "https://github.com" 2>/dev/null; then
+        print_warn "Cannot reach GitHub — DNS or network may be down"
+        print_info "Check: cat /etc/resolv.conf && curl -s https://github.com"
+        return 1
+    fi
+
     local arch
     arch=$(detect_architecture)
     local noizdns_arch="$arch"
@@ -3223,11 +3389,12 @@ ensure_noizdns_binary() {
     local noizdns_release_url="https://github.com/anonvector/noizdns-deploy/releases/latest/download/dnstt-server-linux-${noizdns_arch}"
     local noizdns_raw_url="https://raw.githubusercontent.com/anonvector/noizdns-deploy/main/bin/dnstt-server-linux-${noizdns_arch}"
 
-    if curl -fsSL -o /usr/local/bin/noizdns-server "$noizdns_own_url" 2>/dev/null; then
+    # Try each URL with progress indicator (--progress-bar so user sees it's not stuck)
+    if curl -fSL --progress-bar --connect-timeout 10 --max-time 60 -o /usr/local/bin/noizdns-server "$noizdns_own_url" 2>/dev/null; then
         noizdns_downloaded=true
-    elif curl -fsSL -o /usr/local/bin/noizdns-server "$noizdns_release_url" 2>/dev/null; then
+    elif curl -fSL --progress-bar --connect-timeout 10 --max-time 60 -o /usr/local/bin/noizdns-server "$noizdns_release_url" 2>/dev/null; then
         noizdns_downloaded=true
-    elif curl -fsSL -o /usr/local/bin/noizdns-server "$noizdns_raw_url" 2>/dev/null; then
+    elif curl -fSL --progress-bar --connect-timeout 10 --max-time 60 -o /usr/local/bin/noizdns-server "$noizdns_raw_url" 2>/dev/null; then
         noizdns_downloaded=true
     fi
 
@@ -3517,7 +3684,7 @@ do_add_xray() {
 
     # Determine tag — check existing xray tags and increment (exact match)
     local xray_num=1
-    while dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | grep -qxF "tag=xray${xray_num}"; do
+    while dnstm_tag_exists "xray${xray_num}"; do
         xray_num=$((xray_num + 1))
     done
     local tag="xray${xray_num}"
@@ -3532,7 +3699,7 @@ do_add_xray() {
     create_output=$(dnstm tunnel add --transport dnstt --backend socks --domain "x.${DOMAIN}" --tag "$tag" $mtu_flag 2>&1) || true
     echo "$create_output"
 
-    if ! dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | grep -qxF "tag=${tag}"; then
+    if ! dnstm_tag_exists "${tag}"; then
         print_fail "Tunnel creation failed."
         if [[ "$XRAY_PANEL_TYPE" == "headless" ]]; then
             print_info "Note: Xray inbound on port ${XRAY_INBOUND_PORT} was added to config.json but the tunnel failed."
@@ -4248,7 +4415,7 @@ step_install_dnstm() {
     dnstm router stop 2>/dev/null || true
     # Remove all existing tunnels (they'll be recreated in Step 7 with correct ports)
     local old_tags
-    old_tags=$(dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
+    old_tags=$(dnstm_get_tags)
     for tag in $old_tags; do
         dnstm tunnel stop --tag "$tag" 2>/dev/null || true
         dnstm tunnel remove --tag "$tag" 2>/dev/null || true
@@ -4571,6 +4738,22 @@ step_create_tunnels() {
 step_start_services() {
     print_step 8 "Start Services"
 
+    # Validate dnstt-server binary supports -udp (detect if NoizDNS binary overwrote it)
+    if [[ -x /usr/local/bin/dnstt-server ]]; then
+        if ! /usr/local/bin/dnstt-server -help 2>&1 | grep -q '\-udp'; then
+            print_warn "dnstt-server binary does not support -udp (may be NoizDNS fork) — re-downloading correct binary..."
+            local _dnstt_arch
+            _dnstt_arch=$(detect_architecture)
+            if curl -fsSL --connect-timeout 10 --max-time 30 -o /usr/local/bin/dnstt-server \
+                "https://github.com/net2share/dnstt/releases/download/latest/dnstt-server-linux-${_dnstt_arch}" 2>/dev/null; then
+                chmod +x /usr/local/bin/dnstt-server
+                print_ok "Re-downloaded correct dnstt-server binary"
+            else
+                print_warn "Could not re-download dnstt-server — DNSTT tunnels may fail"
+            fi
+        fi
+    fi
+
     # Reload systemd to pick up any service overrides (e.g., NoizDNS binary swap)
     systemctl daemon-reload 2>/dev/null || true
 
@@ -4589,7 +4772,7 @@ step_start_services() {
 
     # Start all tunnels
     local all_tags
-    all_tags=$(dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
+    all_tags=$(dnstm_get_tags)
     if [[ -z "$all_tags" ]]; then
         all_tags="slip1 dnstt1 slip-ssh dnstt-ssh"
         [[ -x /usr/local/bin/noizdns-server ]] && all_tags+=" noiz1 noiz-ssh"
@@ -4599,7 +4782,7 @@ step_start_services() {
         if dnstm tunnel start --tag "$tag" 2>/dev/null; then
             print_ok "Started: ${tag}"
         else
-            if dnstm tunnel list 2>/dev/null | awk -v t="tag=${tag}" '{for(i=1;i<=NF;i++) if($i==t){print;next}}' | grep -qi "running"; then
+            if dnstm_tag_exists "$tag" && dnstm tunnel list 2>/dev/null | grep -wF "$tag" | grep -qi "running"; then
                 print_ok "Already running: ${tag}"
             else
                 print_warn "Could not start: ${tag}. Check: dnstm tunnel logs --tag ${tag}"
@@ -5326,7 +5509,7 @@ step_summary() {
 detect_next_tunnel_num() {
     local max=1
     local tags
-    tags=$(dnstm tunnel list 2>/dev/null | grep -o 'tag=[^ ]*' | sed 's/tag=//' || true)
+    tags=$(dnstm_get_tags)
     for tag in $tags; do
         local num
         num=$(echo "$tag" | grep -oE '[0-9]+$' || true)
@@ -5642,7 +5825,7 @@ do_add_domain() {
         if dnstm tunnel start --tag "$tag" 2>/dev/null; then
             print_ok "Started: ${tag}"
         else
-            if dnstm tunnel list 2>/dev/null | awk -v t="tag=${tag}" '{for(i=1;i<=NF;i++) if($i==t){print;next}}' | grep -qi "running"; then
+            if dnstm_tag_exists "$tag" && dnstm tunnel list 2>/dev/null | grep -wF "$tag" | grep -qi "running"; then
                 print_ok "Already running: ${tag}"
             else
                 print_warn "Could not start: ${tag}. Check: dnstm tunnel logs --tag ${tag}"
@@ -5654,7 +5837,7 @@ do_add_domain() {
     sleep 3
     for _ntag in ${noiz_tag:-} ${noiz_ssh_tag:-}; do
         [[ -z "$_ntag" ]] && continue
-        if dnstm tunnel list 2>/dev/null | grep -q "tag=${_ntag}"; then
+        if dnstm_tag_exists "$_ntag"; then
             if ! systemctl is-active --quiet "dnstm-${_ntag}.service" 2>/dev/null; then
                 # Retry — give it more time before removing
                 print_info "Waiting for ${_ntag} to start..."

@@ -123,20 +123,47 @@ This delegates `x.yourdomain.com` to your server, just like the other tunnel sub
 
 ## Phone Setup
 
+### Why two apps?
+
+The Xray inbound listens on `127.0.0.1` (localhost) on the server. This is intentional — it is **not exposed to the internet**, so censors cannot detect or block it. The only way to reach it is through the DNS tunnel.
+
+This is how the two apps work together:
+
+1. **SlipNet** creates a DNS tunnel between your phone and the server. On your phone, it opens a local SOCKS proxy on `127.0.0.1:1080`. On the server side, traffic exits the tunnel and arrives at localhost — where Xray is listening.
+
+2. **Nekobox** speaks the Xray protocol (VLESS/VMess/etc). You tell Nekobox to send its traffic through SlipNet's SOCKS proxy (`127.0.0.1:1080`). Nekobox thinks it's connecting to `127.0.0.1` on the server — and it is, because the tunnel makes server's localhost reachable from your phone.
+
+```
+Your phone                          Your server
+──────────                          ───────────
+Nekobox (vless://127.0.0.1:PORT)
+    │
+    └──→ SlipNet SOCKS (127.0.0.1:1080)
+              │
+              └──→ DNS queries (port 53) ──→ DNSTT decodes
+                                                  │
+                                                  └──→ 127.0.0.1:PORT (Xray)
+                                                            │
+                                                            └──→ Internet
+```
+
+> **The vless:// link alone will NOT work** — without SlipNet, there is no tunnel, and `127.0.0.1` on the server is unreachable from your phone.
+
 ### Required apps
 
 You need two apps:
 
-- **SlipNet** — for the DNS tunnel ([download](https://github.com/anonvector/SlipNet/releases))
-- **Nekobox** or **v2rayNG** or any V2Ray client — for the Xray protocol
+- **SlipNet** — creates the DNS tunnel ([download](https://github.com/anonvector/SlipNet/releases))
+- **Nekobox** or **v2rayNG** or any V2Ray client — speaks the Xray protocol through the tunnel
 
 Any client that supports **proxy chaining** works:
 
 | Platform | Apps |
 |---|---|
 | Android | Nekobox, v2rayNG, Hiddify, Clash Meta |
-| iOS | Shadowrocket, Stash, V2Box |
 | Desktop | Nekoray, v2rayN, Clash Verge |
+
+> **Note:** SlipNet is currently Android-only. iOS is not supported yet.
 
 ### Step 1: Import tunnel into SlipNet
 
@@ -200,8 +227,8 @@ No. The DNS path is the bottleneck and is unchanged. The benefit is better user 
 **Do I need 3x-ui?**
 No. If not installed, the script offers to install it (full panel or headless).
 
-**Does it work with iOS clients?**
-Yes. Any V2Ray client supporting proxy chaining works. Shadowrocket and Stash are confirmed.
+**Does it work with iOS?**
+Not yet. SlipNet is currently Android-only. iOS support is planned.
 
 **Will my existing tunnels break?**
 No. This feature is completely separate. Slipstream, DNSTT, and NoizDNS tunnels are untouched.
@@ -322,18 +349,51 @@ sudo bash dnstm-setup.sh --add-xray
 
 ## راه‌اندازی سمت گوشی
 
+### چرا دو تا اپ لازمه؟
+
+اینباند Xray روی `127.0.0.1` (localhost) سرور گوش میده. این عمدیه — از اینترنت قابل دسترسی نیست و سانسورچی نمیتونه ببینتش یا بلاکش کنه. تنها راه دسترسی بهش از داخل تانل DNS هست.
+
+دو تا اپ اینجوری با هم کار می‌کنن:
+
+**SlipNet** یه تانل DNS بین گوشی و سرور میسازه. توی گوشیتون یه پراکسی SOCKS محلی روی `127.0.0.1:1080` باز میکنه. سمت سرور، ترافیک از تانل خارج میشه و به localhost سرور میرسه — جایی که Xray گوش میده.
+
+**Nekobox** پروتکل Xray (مثلاً VLESS) رو حرف میزنه. بهش میگید ترافیکش رو از پراکسی SlipNet (`127.0.0.1:1080`) رد کنه. Nekobox فکر میکنه داره به `127.0.0.1` سرور وصل میشه — و واقعاً هم همینه، چون تانل باعث میشه localhost سرور از گوشیتون قابل دسترسی باشه.
+
+</div>
+
+```
+گوشی شما                              سرور شما
+──────────                            ───────────
+Nekobox (vless://127.0.0.1:PORT)
+    │
+    └──→ SlipNet SOCKS (127.0.0.1:1080)
+              │
+              └──→ DNS queries (port 53) ──→ DNSTT decodes
+                                                  │
+                                                  └──→ 127.0.0.1:PORT (Xray)
+                                                            │
+                                                            └──→ اینترنت آزاد
+```
+
+<div dir="rtl">
+
+**لینک vless:// به تنهایی کار نمیکنه** — بدون SlipNet تانلی وجود نداره و `127.0.0.1` سرور از گوشیتون قابل دسترسی نیست.
+
+### اپ‌های مورد نیاز
+
 دو تا اپ لازم دارید:
 
-- **SlipNet** — برای تانل DNS ([دانلود](https://github.com/anonvector/SlipNet/releases))
-- **Nekobox** یا **v2rayNG** یا هر کلاینت V2Ray دیگه — برای پروتکل Xray
+- **SlipNet** — تانل DNS رو میسازه ([دانلود](https://github.com/anonvector/SlipNet/releases))
+- **Nekobox** یا **v2rayNG** یا هر کلاینت V2Ray دیگه — پروتکل Xray رو از داخل تانل رد میکنه
 
 هر کلاینتی که **زنجیره پراکسی** (proxy chain) پشتیبانی کنه کار می‌کنه:
 
 | پلتفرم | اپ‌ها |
 |---|---|
 | Android | Nekobox, v2rayNG, Hiddify, Clash Meta |
-| iOS | Shadowrocket, Stash, V2Box |
 | Desktop | Nekoray, v2rayN, Clash Verge |
+
+**توجه:** SlipNet فعلاً فقط برای اندروید هست. پشتیبانی iOS هنوز اضافه نشده.
 
 **مرحله ۱:** اپ SlipNet رو باز کنید و لینک اول (`slipnet://`) رو وارد کنید. پروفایل تانل خودکار ساخته میشه.
 
@@ -371,7 +431,7 @@ sudo bash dnstm-setup.sh --remove-tunnel xray1
 
 **حتماً باید 3x-ui داشته باشم؟** نه. اسکریپت پیشنهاد نصب میده. حالت بدون داشبورد هم هست.
 
-**با کلاینت‌های iOS کار می‌کنه؟** بله. Shadowrocket و Stash تست شدن.
+**با iOS کار می‌کنه؟** فعلاً نه. SlipNet فقط برای اندروید هست. پشتیبانی iOS در برنامه هست.
 
 **تانل‌های قبلیم خراب میشه؟** نه. این قابلیت کاملاً جداست.
 
