@@ -3074,11 +3074,15 @@ ensure_noizdns_binary() {
             print_warn "NoizDNS binary is empty (download may have failed)"
             rm -f /usr/local/bin/noizdns-server
             return 1
-        elif timeout 3 /usr/local/bin/noizdns-server -help 2>&1 | grep -qi "usage\|flag\|dnstt\|privkey"; then
+        fi
+        # Validate: must be an ELF binary for this architecture
+        local file_type
+        file_type=$(file /usr/local/bin/noizdns-server 2>/dev/null || true)
+        if echo "$file_type" | grep -qi "ELF.*executable"; then
             print_ok "NoizDNS server installed and verified"
             return 0
         else
-            print_warn "NoizDNS binary downloaded but may be corrupt or wrong architecture"
+            print_warn "NoizDNS binary is not a valid executable (got: ${file_type})"
             rm -f /usr/local/bin/noizdns-server
             return 1
         fi
