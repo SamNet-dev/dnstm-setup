@@ -13,6 +13,22 @@ set -euo pipefail
 VERSION="1.3"
 TOTAL_STEPS=12
 
+# ─── Safety: ensure DNS is never left broken on exit ──────────────────────────
+
+_dnstm_cleanup_dns() {
+    # If resolv.conf is empty, missing, or points only at a dead stub, fix it.
+    if [[ ! -s /etc/resolv.conf ]] || \
+       ( grep -q '127\.0\.0\.53' /etc/resolv.conf 2>/dev/null && \
+         ! ss -ulnp 2>/dev/null | grep -q '127\.0\.0\.53.*systemd-resolve' ); then
+        chattr -i /etc/resolv.conf 2>/dev/null || true
+        cat > /etc/resolv.conf 2>/dev/null <<'DNSEOF' || true
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+DNSEOF
+    fi
+}
+trap '_dnstm_cleanup_dns' EXIT
+
 # ─── Colors & Formatting ───────────────────────────────────────────────────────
 
 RED='\033[0;31m'
@@ -1067,14 +1083,20 @@ ensure_resolv_conf_fallback() {
     # After stopping systemd-resolved, /etc/resolv.conf may still point to
     # 127.0.0.53 which is now dead.  Write a temporary fallback so the script
     # can still resolve hostnames (e.g. github.com for downloads).
-    if grep -q '127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
+    if grep -q '127\.0\.0\.53' /etc/resolv.conf 2>/dev/null || \
+       [[ ! -s /etc/resolv.conf ]]; then
         print_info "Updating /etc/resolv.conf with public DNS fallback"
         chattr -i /etc/resolv.conf 2>/dev/null || true
+        rm -f /etc/resolv.conf 2>/dev/null || true
         cat > /etc/resolv.conf <<'RESOLVEOF'
-# Temporary fallback written by dnstm-setup (systemd-resolved was stopped)
 nameserver 8.8.8.8
 nameserver 1.1.1.1
 RESOLVEOF
+        # Verify the write succeeded
+        if ! grep -q '8\.8\.8\.8' /etc/resolv.conf 2>/dev/null; then
+            # Last resort: try writing via echo
+            echo "nameserver 8.8.8.8" > /etc/resolv.conf 2>/dev/null || true
+        fi
     fi
 }
 
@@ -1108,6 +1130,26 @@ EOF
 
     if [[ -e /run/systemd/resolve/resolv.conf ]]; then
         ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true
+    fi
+
+    # After relinking, resolv.conf may still reference 127.0.0.53 (dead stub).
+    # Also verify DNS actually works — if not, write direct public nameservers.
+    sleep 1
+    local dns_ok=false
+    if getent hosts github.com &>/dev/null 2>&1; then
+        dns_ok=true
+    elif curl -sf --max-time 3 https://api.ipify.org &>/dev/null 2>&1; then
+        dns_ok=true
+    fi
+
+    if [[ "$dns_ok" != "true" ]] || grep -q '127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
+        print_warn "DNS broken after disabling stub listener — writing fallback nameservers"
+        chattr -i /etc/resolv.conf 2>/dev/null || true
+        rm -f /etc/resolv.conf 2>/dev/null || true
+        cat > /etc/resolv.conf <<'DNSEOF'
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+DNSEOF
     fi
 
     return 0
@@ -1620,7 +1662,7 @@ do_add_tunnel() {
     echo ""
 
     # Detect server IP
-    SERVER_IP=$(curl -4 -s --max-time 10 https://api.ipify.org 2>/dev/null || true)
+    SERVER_IP=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || curl -4 -s --max-time 5 https://ifconfig.me 2>/dev/null || curl -4 -s --max-time 5 https://icanhazip.com 2>/dev/null || true)
     if [[ -n "$SERVER_IP" ]]; then
         print_ok "Server IP: ${SERVER_IP}"
     fi
@@ -1950,8 +1992,19 @@ do_uninstall() {
     systemctl unmask systemd-resolved.socket systemd-resolved.service 2>/dev/null || true
     systemctl enable systemd-resolved.service 2>/dev/null || true
     systemctl restart systemd-resolved.service 2>/dev/null || true
+    sleep 1
     if [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
         ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf || true
+    fi
+    # Ensure DNS works after uninstall — if resolv.conf is broken, write fallback
+    if ! getent hosts google.com >/dev/null 2>&1 && \
+       ! curl -sf --max-time 3 https://api.ipify.org >/dev/null 2>&1; then
+        print_warn "DNS not working after restore — writing fallback nameservers"
+        chattr -i /etc/resolv.conf 2>/dev/null || true
+        cat > /etc/resolv.conf <<'DNSEOF'
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+DNSEOF
     fi
     print_ok "Restored systemd-resolved defaults (best effort)"
 
@@ -2019,10 +2072,22 @@ do_manage_users() {
         # Run initial configure
         print_info "Applying SSH security configuration..."
         mkdir -p /run/sshd 2>/dev/null || true
+        # Back up sshd_config before modification
+        if [[ -f /etc/ssh/sshd_config ]]; then
+            cp -f /etc/ssh/sshd_config /etc/ssh/sshd_config.dnstm-backup 2>/dev/null || true
+        fi
         if timeout 30 sshtun-user configure </dev/null 2>&1; then
             print_ok "SSH configuration applied"
         else
             print_warn "SSH configuration may not have applied fully — user management may have issues"
+        fi
+        # Validate sshd_config — rollback if broken
+        if command -v sshd &>/dev/null && ! sshd -t 2>/dev/null; then
+            print_warn "sshd_config validation failed — rolling back"
+            if [[ -f /etc/ssh/sshd_config.dnstm-backup ]]; then
+                cp -f /etc/ssh/sshd_config.dnstm-backup /etc/ssh/sshd_config
+                print_ok "Restored sshd_config from backup"
+            fi
         fi
         echo ""
     fi
@@ -3142,7 +3207,7 @@ do_add_xray() {
     fi
 
     # Detect server IP
-    SERVER_IP=$(curl -4 -s --max-time 10 https://api.ipify.org 2>/dev/null || true)
+    SERVER_IP=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || curl -4 -s --max-time 5 https://ifconfig.me 2>/dev/null || curl -4 -s --max-time 5 https://icanhazip.com 2>/dev/null || true)
     if [[ -n "$SERVER_IP" ]]; then
         print_ok "Server IP: ${SERVER_IP}"
     else
@@ -3583,6 +3648,11 @@ step_preflight() {
         exit 1
     fi
 
+    # Back up resolv.conf so we can always recover DNS
+    if [[ -f /etc/resolv.conf ]] && [[ ! -f /etc/resolv.conf.dnstm-backup ]]; then
+        cp -f /etc/resolv.conf /etc/resolv.conf.dnstm-backup 2>/dev/null || true
+    fi
+
     # Check OS (read in subshell to avoid overwriting script's VERSION variable)
     if [[ -f /etc/os-release ]]; then
         local os_id os_name
@@ -3617,8 +3687,21 @@ step_preflight() {
         fi
     fi
 
+    # Ensure DNS resolution works (may be broken after previous uninstall)
+    if ! curl -4 -s --max-time 3 https://api.ipify.org >/dev/null 2>&1; then
+        if grep -q '127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
+            # systemd-resolved stub is dead — replace with public DNS
+            print_warn "DNS broken (stub listener dead) — fixing resolv.conf"
+            chattr -i /etc/resolv.conf 2>/dev/null || true
+            cat > /etc/resolv.conf <<'DNSEOF'
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+DNSEOF
+        fi
+    fi
+
     # Detect server IP
-    SERVER_IP=$(curl -4 -s --max-time 10 https://api.ipify.org 2>/dev/null || true)
+    SERVER_IP=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || curl -4 -s --max-time 5 https://ifconfig.me 2>/dev/null || curl -4 -s --max-time 5 https://icanhazip.com 2>/dev/null || true)
     if [[ -n "$SERVER_IP" ]]; then
         print_ok "Server IP: ${SERVER_IP}"
     else
@@ -3669,6 +3752,17 @@ cloudflare_create_dns_records() {
     local domain="$2"
     local server_ip="$3"
     local cf_api="https://api.cloudflare.com/client/v4"
+
+    # Ensure jq is installed (needed for JSON parsing)
+    if ! command -v jq &>/dev/null; then
+        print_info "Installing jq (needed for Cloudflare API)..."
+        apt-get update -qq >/dev/null 2>&1 || true
+        apt-get install -y -qq jq >/dev/null 2>&1 || true
+        if ! command -v jq &>/dev/null; then
+            print_fail "Could not install jq. Install manually: apt-get install jq"
+            return 1
+        fi
+    fi
 
     # Step 1: Get Zone ID
     print_info "Looking up Cloudflare Zone ID for ${domain}..."
@@ -3804,6 +3898,17 @@ step_dns_records() {
             exit 1
         fi
 
+        # Ensure jq is installed (needed for API JSON parsing)
+        if ! command -v jq &>/dev/null; then
+            print_info "Installing jq (needed for Cloudflare API)..."
+            apt-get update -qq >/dev/null 2>&1 || true
+            apt-get install -y -qq jq >/dev/null 2>&1 || true
+            if ! command -v jq &>/dev/null; then
+                print_fail "Could not install jq. Install manually: apt-get install jq"
+                exit 1
+            fi
+        fi
+
         # Validate token
         print_info "Validating API token..."
         local verify_resp
@@ -3902,9 +4007,10 @@ step_free_port53() {
 
             # Fallback if stub is still present.
             if echo "$port53_output" | grep -q "systemd-resolve\|127\.0\.0\.53"; then
-                print_warn "systemd-resolved still occupies port 53; stopping service as fallback"
+                print_warn "systemd-resolved still occupies port 53; stopping + disabling as fallback"
                 systemctl stop systemd-resolved.socket 2>/dev/null || true
                 systemctl stop systemd-resolved.service 2>/dev/null || true
+                systemctl disable systemd-resolved.service 2>/dev/null || true
                 ensure_resolv_conf_fallback
                 sleep 1
             fi
@@ -4069,9 +4175,10 @@ step_verify_port53() {
         sleep 2
         port53_output=$(ss -ulnp 2>/dev/null | grep -E ':53\b' || true)
         if echo "$port53_output" | grep -q "systemd-resolve\|127\.0\.0\.53"; then
-            print_warn "systemd-resolved still occupies :53; stopping service as fallback"
+            print_warn "systemd-resolved still occupies :53; stopping + disabling as fallback"
             systemctl stop systemd-resolved.socket 2>/dev/null || true
             systemctl stop systemd-resolved.service 2>/dev/null || true
+            systemctl disable systemd-resolved.service 2>/dev/null || true
             ensure_resolv_conf_fallback
         fi
         sleep 2
@@ -4599,6 +4706,12 @@ step_ssh_user() {
     # Configure SSH (only needed once)
     print_info "Applying SSH security configuration..."
     mkdir -p /run/sshd 2>/dev/null || true
+
+    # Back up sshd_config before any modification
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        cp -f /etc/ssh/sshd_config /etc/ssh/sshd_config.dnstm-backup 2>/dev/null || true
+    fi
+
     local configure_output
     configure_output=$(timeout 30 sshtun-user configure </dev/null 2>&1) || true
     if echo "$configure_output" | grep -qi "already"; then
@@ -4608,6 +4721,15 @@ step_ssh_user() {
         echo -e "  ${DIM}${configure_output}${NC}"
     else
         print_ok "SSH configuration applied"
+    fi
+
+    # Validate sshd_config — rollback if broken
+    if command -v sshd &>/dev/null && ! sshd -t 2>/dev/null; then
+        print_warn "sshd_config validation failed — rolling back"
+        if [[ -f /etc/ssh/sshd_config.dnstm-backup ]]; then
+            cp -f /etc/ssh/sshd_config.dnstm-backup /etc/ssh/sshd_config
+            print_ok "Restored sshd_config from backup"
+        fi
     fi
 
     echo ""
@@ -5051,7 +5173,7 @@ do_add_domain() {
     fi
 
     # Detect server IP
-    SERVER_IP=$(curl -4 -s --max-time 10 https://api.ipify.org 2>/dev/null || true)
+    SERVER_IP=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || curl -4 -s --max-time 5 https://ifconfig.me 2>/dev/null || curl -4 -s --max-time 5 https://icanhazip.com 2>/dev/null || true)
     if [[ -z "$SERVER_IP" ]]; then
         SERVER_IP=$(prompt_input "Enter your server's public IP")
         if [[ -z "$SERVER_IP" ]]; then
