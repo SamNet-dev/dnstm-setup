@@ -2160,6 +2160,11 @@ do_uninstall() {
         print_ok "Removed /usr/local/bin/noizdns-server"
     fi
 
+    if [[ -f /usr/local/bin/dnstm-setup ]]; then
+        rm -f /usr/local/bin/dnstm-setup
+        print_ok "Removed /usr/local/bin/dnstm-setup"
+    fi
+
     # Stop microsocks
     if systemctl is-active --quiet microsocks 2>/dev/null; then
         systemctl stop microsocks 2>/dev/null || true
@@ -5582,6 +5587,21 @@ step_summary() {
     echo ""
 }
 
+# ─── Install to PATH ─────────────────────────────────────────────────────────────
+
+install_to_path() {
+    local script_path
+    script_path=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")
+    local target="/usr/local/bin/dnstm-setup"
+
+    # Skip if already installed there
+    [[ "$script_path" == "$target" ]] && return 0
+
+    cp -f "$script_path" "$target" 2>/dev/null || return 0
+    chmod +x "$target"
+    print_ok "Installed dnstm-setup to PATH (run 'dnstm-setup --manage' from anywhere)"
+}
+
 # ─── Add Domain ──────────────────────────────────────────────────────────────────
 
 # Detect next available tunnel number by scanning existing tags
@@ -6229,6 +6249,7 @@ main() {
     step_verify_microsocks
     step_ssh_user
     step_tests
+    install_to_path
     step_summary
     unset SSH_PASS 2>/dev/null || true
 }
