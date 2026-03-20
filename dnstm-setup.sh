@@ -922,18 +922,20 @@ do_status() {
         local subdomain
         subdomain=$(echo "$tag_domain" | sed 's/\..*//')
 
-        # Get DNSTT pubkey if it's a dnstt or xray tunnel (both use DNSTT transport)
+        # Get DNSTT pubkey — required by SlipNet for ALL tunnel types
         local pubkey=""
-        if echo "$tag" | grep -qE "^(dnstt|xray|noiz)"; then
-            if [[ -f "/etc/dnstm/tunnels/${tag}/server.pub" ]]; then
-                pubkey=$(cat "/etc/dnstm/tunnels/${tag}/server.pub" 2>/dev/null || true)
-            fi
+        if [[ -f "/etc/dnstm/tunnels/${tag}/server.pub" ]]; then
+            pubkey=$(cat "/etc/dnstm/tunnels/${tag}/server.pub" 2>/dev/null || true)
+        fi
+        # Slipstream tunnels don't have server.pub — grab any available dnstt pubkey
+        if [[ -z "$pubkey" ]]; then
+            pubkey=$(cat /etc/dnstm/tunnels/*/server.pub 2>/dev/null | head -1 || true)
         fi
 
         local url=""
         case "$tag" in
             slip[0-9]*)
-                url=$(generate_slipnet_url "ss" "$subdomain" "" "" "" "$s_user" "$s_pass")
+                url=$(generate_slipnet_url "ss" "$subdomain" "$pubkey" "" "" "$s_user" "$s_pass")
                 ;;
             dnstt[0-9]*)
                 if [[ -n "$pubkey" ]]; then
@@ -2410,9 +2412,11 @@ do_manage_users() {
                             if [[ -n "$dnstt_tag_name" && -f "/etc/dnstm/tunnels/${dnstt_tag_name}/server.pub" ]]; then
                                 pubkey=$(cat "/etc/dnstm/tunnels/${dnstt_tag_name}/server.pub" 2>/dev/null || true)
                             fi
-                            # Slipstream + SSH
+                            # Slipstream + SSH — SlipNet needs pubkey even for slipstream
+                            local slip_ssh_pk=""
+                            slip_ssh_pk=$(cat /etc/dnstm/tunnels/*/server.pub 2>/dev/null | head -1 || true)
                             local url
-                            url=$(generate_slipnet_url "slipstream_ssh" "s" "" "$new_user" "$final_pass" "$s_user" "$s_pass")
+                            url=$(generate_slipnet_url "slipstream_ssh" "s" "$slip_ssh_pk" "$new_user" "$final_pass" "$s_user" "$s_pass")
                             echo -e "  ${GREEN}s.${dom}:${NC}  ${url}"
                             # DNSTT + SSH
                             if [[ -n "$pubkey" ]]; then
@@ -5498,8 +5502,10 @@ step_summary() {
         s_user="$SOCKS_USER"
         s_pass="$SOCKS_PASS"
     fi
-    # Slipstream + SOCKS
-    slipnet_url=$(generate_slipnet_url "ss" "t" "" "" "" "$s_user" "$s_pass")
+    # Slipstream + SOCKS — SlipNet needs pubkey even for slipstream
+    local _slip_pk=""
+    _slip_pk=$(cat /etc/dnstm/tunnels/*/server.pub 2>/dev/null | head -1 || true)
+    slipnet_url=$(generate_slipnet_url "ss" "t" "$_slip_pk" "" "" "$s_user" "$s_pass")
     echo -e "  ${GREEN}slip1:${NC}    ${slipnet_url}"
     # DNSTT + SOCKS
     if [[ -n "$DNSTT_PUBKEY" ]]; then
@@ -5513,7 +5519,9 @@ step_summary() {
     fi
     # SSH tunnels
     if [[ "$SSH_SETUP_DONE" == true && -n "$SSH_USER" && -n "$SSH_PASS" ]]; then
-        slipnet_url=$(generate_slipnet_url "slipstream_ssh" "s" "" "$SSH_USER" "$SSH_PASS" "$s_user" "$s_pass")
+        local _any_pk=""
+        _any_pk=$(cat /etc/dnstm/tunnels/*/server.pub 2>/dev/null | head -1 || true)
+        slipnet_url=$(generate_slipnet_url "slipstream_ssh" "s" "$_any_pk" "$SSH_USER" "$SSH_PASS" "$s_user" "$s_pass")
         echo -e "  ${GREEN}slip-ssh:${NC}  ${slipnet_url}"
         # dnstt-ssh has its own keypair
         local dnstt_ssh_pubkey=""
@@ -6099,7 +6107,9 @@ do_add_domain() {
         s_user="$SOCKS_USER"
         s_pass="$SOCKS_PASS"
     fi
-    slipnet_url=$(generate_slipnet_url "ss" "t" "" "" "" "$s_user" "$s_pass")
+    local _slip_pk2=""
+    _slip_pk2=$(cat /etc/dnstm/tunnels/*/server.pub 2>/dev/null | head -1 || true)
+    slipnet_url=$(generate_slipnet_url "ss" "t" "$_slip_pk2" "" "" "$s_user" "$s_pass")
     echo -e "  ${GREEN}${slip_tag}:${NC}      ${slipnet_url}"
     if [[ -n "$DNSTT_PUBKEY" ]]; then
         slipnet_url=$(generate_slipnet_url "dnstt" "d" "$DNSTT_PUBKEY" "" "" "$s_user" "$s_pass")
@@ -6119,7 +6129,9 @@ do_add_domain() {
         if [[ "$ssh_tun_user" == *"|"* || "$ssh_tun_pass" == *"|"* ]]; then
             print_fail "Username/password cannot contain the | character"
         elif [[ -n "$ssh_tun_user" && -n "$ssh_tun_pass" ]]; then
-            slipnet_url=$(generate_slipnet_url "slipstream_ssh" "s" "" "$ssh_tun_user" "$ssh_tun_pass" "$s_user" "$s_pass")
+            local _any_pk2=""
+            _any_pk2=$(cat /etc/dnstm/tunnels/*/server.pub 2>/dev/null | head -1 || true)
+            slipnet_url=$(generate_slipnet_url "slipstream_ssh" "s" "$_any_pk2" "$ssh_tun_user" "$ssh_tun_pass" "$s_user" "$s_pass")
             echo -e "  ${GREEN}${slip_ssh_tag}:${NC}  ${slipnet_url}"
             # dnstt-ssh has its own keypair — read from its own tunnel dir
             local _dnstt_ssh_pk=""
