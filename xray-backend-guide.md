@@ -42,12 +42,12 @@ The script creates one inbound with one UUID or password. After setup, you can a
 
 | Feature | Without Xray | With Xray |
 |---|---|---|
-| User management | One shared SOCKS5 password | Per-user from panel |
+| User management | Single SOCKS5 user only | Per-user from panel |
 | Traffic stats | None | Per-user in dashboard |
 | Data limits | None | Configurable |
 | Expiry dates | None | Configurable |
 | Protocol | SOCKS5 only | VLESS / SS / VMess / Trojan |
-| Disable a user | Change password (affects all) | One click in panel |
+| Disable a user | Change the single password | One click in panel (per-user) |
 
 ---
 
@@ -293,12 +293,12 @@ Phone (SlipNet + Nekobox) / گوشی
 
 | قابلیت | بدون Xray | با Xray |
 |---|---|---|
-| مدیریت کاربر | یه رمز SOCKS5 مشترک | هر کاربر جدا از پنل |
+| مدیریت کاربر | فقط یک کاربر SOCKS5 | هر کاربر جدا از پنل |
 | آمار ترافیک | نداره | برای هر کاربر در داشبورد |
 | محدودیت حجم | نداره | قابل تنظیم |
 | تاریخ انقضا | نداره | قابل تنظیم |
 | پروتکل | فقط SOCKS5 | VLESS / SS / VMess / Trojan |
-| غیرفعال کردن کاربر | رمز عوض کن (همه تحت تأثیر) | یه کلیک توی پنل (فقط اون کاربر) |
+| غیرفعال کردن کاربر | رمز رو عوض کن | یه کلیک توی پنل (فقط اون کاربر) |
 
 ---
 

@@ -16,11 +16,19 @@ TOTAL_STEPS=12
 # ─── Safety: ensure DNS is never left broken on exit ──────────────────────────
 
 _dnstm_cleanup_dns() {
-    # If resolv.conf is empty, missing, or points only at a dead stub, fix it.
-    if [[ ! -s /etc/resolv.conf ]] || \
-       ( grep -q '127\.0\.0\.53' /etc/resolv.conf 2>/dev/null && \
-         ! ss -ulnp 2>/dev/null | grep -q '127\.0\.0\.53.*systemd-resolve' ); then
+    # If resolv.conf is empty, missing, points at a dead stub, or has no nameservers, fix it.
+    local _needs_dns_fix=false
+    if [[ ! -s /etc/resolv.conf ]]; then
+        _needs_dns_fix=true
+    elif grep -q '127\.0\.0\.53' /etc/resolv.conf 2>/dev/null && \
+         ! ss -ulnp 2>/dev/null | grep -q '127\.0\.0\.53.*systemd-resolve'; then
+        _needs_dns_fix=true
+    elif ! grep -q '^nameserver' /etc/resolv.conf 2>/dev/null; then
+        _needs_dns_fix=true
+    fi
+    if [[ "$_needs_dns_fix" == true ]]; then
         chattr -i /etc/resolv.conf 2>/dev/null || true
+        rm -f /etc/resolv.conf 2>/dev/null || true
         cat > /etc/resolv.conf 2>/dev/null <<'DNSEOF' || true
 nameserver 8.8.8.8
 nameserver 1.1.1.1
@@ -863,6 +871,11 @@ do_status() {
             echo ""
         fi
     fi
+    # Read stored SSH credentials for URL generation
+    if [[ -f /etc/dnstm/ssh-credentials ]]; then
+        ssh_user=$(cut -d: -f1 /etc/dnstm/ssh-credentials 2>/dev/null || true)
+        ssh_pass=$(cut -d: -f2- /etc/dnstm/ssh-credentials 2>/dev/null || true)
+    fi
 
     # ─── Share URLs — dnst:// ───
     echo -e "  ${BOLD}Share URLs — dnst:// (for dnstc CLI)${NC}"
@@ -943,12 +956,26 @@ do_status() {
                 fi
                 ;;
             slip-ssh*)
-                echo -e "  ${DIM}${tag}: requires SSH credentials — generate after adding user${NC}"
-                continue
+                if [[ -n "$ssh_user" && -n "$ssh_pass" ]]; then
+                    url=$(generate_slipnet_url "slipstream_ssh" "$subdomain" "$pubkey" "$ssh_user" "$ssh_pass" "$s_user" "$s_pass")
+                elif [[ "$has_ssh_users" == true ]]; then
+                    echo -e "  ${DIM}${tag}: regenerate with — sudo bash $0 --users (option 5)${NC}"
+                    continue
+                else
+                    echo -e "  ${DIM}${tag}: create SSH user first — sudo bash $0 --users${NC}"
+                    continue
+                fi
                 ;;
             dnstt-ssh*)
-                echo -e "  ${DIM}${tag}: requires SSH credentials — generate after adding user${NC}"
-                continue
+                if [[ -n "$ssh_user" && -n "$ssh_pass" ]]; then
+                    url=$(generate_slipnet_url "dnstt_ssh" "$subdomain" "$pubkey" "$ssh_user" "$ssh_pass" "$s_user" "$s_pass")
+                elif [[ "$has_ssh_users" == true ]]; then
+                    echo -e "  ${DIM}${tag}: regenerate with — sudo bash $0 --users (option 5)${NC}"
+                    continue
+                else
+                    echo -e "  ${DIM}${tag}: create SSH user first — sudo bash $0 --users${NC}"
+                    continue
+                fi
                 ;;
             xray*)
                 if [[ -n "$pubkey" ]]; then
@@ -961,8 +988,15 @@ do_status() {
                 fi
                 ;;
             noiz-ssh*)
-                echo -e "  ${DIM}${tag}: requires SSH credentials — generate after adding user${NC}"
-                continue
+                if [[ -n "$ssh_user" && -n "$ssh_pass" ]]; then
+                    url=$(generate_slipnet_url "sayedns_ssh" "$subdomain" "$pubkey" "$ssh_user" "$ssh_pass" "$s_user" "$s_pass")
+                elif [[ "$has_ssh_users" == true ]]; then
+                    echo -e "  ${DIM}${tag}: regenerate with — sudo bash $0 --users (option 5)${NC}"
+                    continue
+                else
+                    echo -e "  ${DIM}${tag}: create SSH user first — sudo bash $0 --users${NC}"
+                    continue
+                fi
                 ;;
         esac
 
@@ -1193,10 +1227,18 @@ microsocks_binary_works() {
 
 ensure_resolv_conf_fallback() {
     # After stopping systemd-resolved, /etc/resolv.conf may still point to
-    # 127.0.0.53 which is now dead.  Write a fallback and lock it so nothing
-    # (package manager, resolved restart) can overwrite it.
-    if grep -q '127\.0\.0\.53' /etc/resolv.conf 2>/dev/null || \
-       [[ ! -s /etc/resolv.conf ]]; then
+    # 127.0.0.53 which is now dead, or be a symlink to resolved's file with
+    # no nameservers.  Write a fallback and lock it so nothing can overwrite it.
+    local needs_fix=false
+    if [[ ! -s /etc/resolv.conf ]]; then
+        needs_fix=true
+    elif grep -q '127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
+        needs_fix=true
+    elif ! grep -q '^nameserver' /etc/resolv.conf 2>/dev/null; then
+        # File exists but has no nameserver lines (e.g. resolved uplink mode with no DNS)
+        needs_fix=true
+    fi
+    if [[ "$needs_fix" == true ]]; then
         print_info "Updating /etc/resolv.conf with public DNS fallback"
         chattr -i /etc/resolv.conf 2>/dev/null || true
         rm -f /etc/resolv.conf 2>/dev/null || true
@@ -2317,11 +2359,12 @@ do_manage_users() {
         echo -e "  ${BOLD}2${NC}  Add user"
         echo -e "  ${BOLD}3${NC}  Change password"
         echo -e "  ${BOLD}4${NC}  Delete user"
+        echo -e "  ${BOLD}5${NC}  Regenerate SSH share URLs"
         echo -e "  ${BOLD}0${NC}  Exit"
         echo ""
 
         local choice=""
-        read -rp "  Select [0-4]: " choice || break
+        read -rp "  Select [0-5]: " choice || break
 
         case "$choice" in
             1)
@@ -2378,14 +2421,17 @@ do_manage_users() {
                     fi
                 fi
 
-                # Generate slipnet:// URLs for SSH tunnels
+                # Save credentials for status page URL generation
                 if [[ "$user_created" == true ]]; then
-                    # Get the actual password (if auto-generated, read it back)
                     local final_pass="$new_pass"
                     if [[ -z "$final_pass" ]]; then
                         final_pass=$(sshtun-user show "$new_user" 2>/dev/null | grep -i pass | awk '{print $NF}' || true)
                     fi
                     if [[ -n "$final_pass" ]]; then
+                        # Store credentials (root-only) for status page
+                        mkdir -p /etc/dnstm 2>/dev/null || true
+                        echo "${new_user}:${final_pass}" > /etc/dnstm/ssh-credentials
+                        chmod 600 /etc/dnstm/ssh-credentials
                         echo ""
                         print_info "SlipNet SSH config URLs for user '${new_user}':"
                         echo ""
@@ -2467,6 +2513,10 @@ do_manage_users() {
                 echo ""
                 if timeout 30 sshtun-user update "$upd_user" --insecure-password "$upd_pass" 2>&1; then
                     print_ok "Password updated for '${upd_user}'"
+                    # Update stored credentials
+                    mkdir -p /etc/dnstm 2>/dev/null || true
+                    echo "${upd_user}:${upd_pass}" > /etc/dnstm/ssh-credentials
+                    chmod 600 /etc/dnstm/ssh-credentials
                 else
                     print_fail "Failed to update user '${upd_user}'"
                 fi
@@ -2487,12 +2537,81 @@ do_manage_users() {
                 if prompt_yn "Are you sure you want to delete '${del_user}'?" "n"; then
                     if timeout 30 sshtun-user delete "$del_user" 2>&1; then
                         print_ok "User '${del_user}' deleted"
+                        # Remove stored credentials if they match
+                        if [[ -f /etc/dnstm/ssh-credentials ]]; then
+                            local stored_user
+                            stored_user=$(cut -d: -f1 /etc/dnstm/ssh-credentials 2>/dev/null || true)
+                            if [[ "$stored_user" == "$del_user" ]]; then
+                                rm -f /etc/dnstm/ssh-credentials
+                            fi
+                        fi
                     else
                         print_fail "Failed to delete user '${del_user}'"
                     fi
                 else
                     print_info "Cancelled"
                 fi
+                ;;
+            5)
+                echo ""
+                local regen_user regen_pass
+                regen_user=$(prompt_input "Enter SSH tunnel username")
+                regen_user=$(echo "$regen_user" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                if [[ -z "$regen_user" ]]; then
+                    print_fail "Username cannot be empty"
+                    continue
+                fi
+                regen_pass=$(prompt_input "Enter SSH tunnel password")
+                regen_pass=$(echo "$regen_pass" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                if [[ -z "$regen_pass" ]]; then
+                    print_fail "Password cannot be empty"
+                    continue
+                fi
+                echo ""
+                print_info "SlipNet SSH share URLs for '${regen_user}':"
+                echo ""
+                local s_user="" s_pass=""
+                if detect_socks_auth; then
+                    s_user="$SOCKS_USER"
+                    s_pass="$SOCKS_PASS"
+                fi
+                local tunnel_domains
+                tunnel_domains=$(dnstm tunnel list 2>/dev/null || true)
+                local domains
+                domains=$(echo "$tunnel_domains" | awk '{for(i=1;i<=NF;i++) if($i ~ /\.[a-z]/) print $i}' | sed 's/^[a-z]*\.//' | sort -u || true)
+                if [[ -z "$domains" ]]; then
+                    domains=$(echo "$tunnel_domains" | grep -o 'domain=[^ ]*' | sed 's/domain=//;s/^[a-z]*\.//' | sort -u || true)
+                fi
+                for dom in $domains; do
+                    DOMAIN="$dom"
+                    local _any_pk=""
+                    _any_pk=$(cat /etc/dnstm/tunnels/*/server.pub 2>/dev/null | head -1 || true)
+                    # Slipstream + SSH
+                    local url
+                    url=$(generate_slipnet_url "slipstream_ssh" "s" "$_any_pk" "$regen_user" "$regen_pass" "$s_user" "$s_pass")
+                    echo -e "  ${GREEN}slip-ssh (s.${dom}):${NC}"
+                    echo "  ${url}"
+                    echo ""
+                    # DNSTT + SSH
+                    local _dnstt_pk=""
+                    _dnstt_pk=$(cat /etc/dnstm/tunnels/dnstt-ssh/server.pub 2>/dev/null || true)
+                    [[ -z "$_dnstt_pk" ]] && _dnstt_pk=$(cat /etc/dnstm/tunnels/dnstt1/server.pub 2>/dev/null || true)
+                    if [[ -n "$_dnstt_pk" ]]; then
+                        url=$(generate_slipnet_url "dnstt_ssh" "ds" "$_dnstt_pk" "$regen_user" "$regen_pass" "$s_user" "$s_pass")
+                        echo -e "  ${GREEN}dnstt-ssh (ds.${dom}):${NC}"
+                        echo "  ${url}"
+                        echo ""
+                    fi
+                    # NoizDNS + SSH
+                    local _noiz_pk=""
+                    _noiz_pk=$(cat /etc/dnstm/tunnels/noiz-ssh/server.pub 2>/dev/null || true)
+                    if [[ -n "$_noiz_pk" ]]; then
+                        url=$(generate_slipnet_url "sayedns_ssh" "z" "$_noiz_pk" "$regen_user" "$regen_pass" "$s_user" "$s_pass")
+                        echo -e "  ${GREEN}noiz-ssh (z.${dom}):${NC}"
+                        echo "  ${url}"
+                        echo ""
+                    fi
+                done
                 ;;
             0)
                 echo ""
@@ -5248,6 +5367,10 @@ step_ssh_user() {
         print_warn "User creation may have failed or user already exists"
         SSH_SETUP_DONE=true  # Still show in summary
     fi
+    # Store credentials (root-only) for status page URL generation
+    mkdir -p /etc/dnstm 2>/dev/null || true
+    echo "${SSH_USER}:${SSH_PASS}" > /etc/dnstm/ssh-credentials
+    chmod 600 /etc/dnstm/ssh-credentials
 }
 
 # ─── STEP 11: Run Tests ────────────────────────────────────────────────────────
