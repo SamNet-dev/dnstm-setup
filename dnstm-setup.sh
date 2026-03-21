@@ -2935,19 +2935,15 @@ detect_xray_panel() {
                 XRAY_PANEL_PORT=$(sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key='webPort'" 2>/dev/null || true)
             fi
         fi
+
+        # Method 3: Query x-ui binary directly to find the port
+        if [[ -z "$XRAY_PANEL_PORT" ]]; then
+            XRAY_PANEL_PORT=$(x-ui settings 2>&1 | grep -E '^[[:space:]]*port:' | awk -F': ' '{print $2}' | tr -d '[:space:]' || true)
+        fi
+
         # Validate port is numeric
         if [[ -n "$XRAY_PANEL_PORT" && ! "$XRAY_PANEL_PORT" =~ ^[0-9]+$ ]]; then
             XRAY_PANEL_PORT=""
-        fi
-
-        # Method 3: Try common 3x-ui ports (skip 443 — too likely to be nginx)
-        if [[ -z "$XRAY_PANEL_PORT" ]]; then
-            for port in 2053 54321 2087 2083; do
-                if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-                    XRAY_PANEL_PORT="$port"
-                    break
-                fi
-            done
         fi
 
         # Method 4: Fall back to default
