@@ -871,6 +871,27 @@ do_status() {
             echo ""
         fi
     fi
+    # Check and auto-fix sshd reachability (needed for SSH tunnels)
+    if [[ "$has_ssh_users" == true ]]; then
+        if ! timeout 3 bash -c 'echo | nc -w2 127.0.0.1 22' &>/dev/null; then
+            echo -e "  ${YELLOW}[!] sshd not reachable on 127.0.0.1:22 — fixing...${NC}"
+            systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+            if command -v iptables &>/dev/null; then
+                iptables -I INPUT -i lo -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+            fi
+            if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
+                ufw allow from 127.0.0.1 to any port 22 2>/dev/null || true
+            fi
+            sleep 1
+            if timeout 3 bash -c 'echo | nc -w2 127.0.0.1 22' &>/dev/null; then
+                echo -e "  ${GREEN}[+] sshd fixed — now reachable on 127.0.0.1:22${NC}"
+            else
+                echo -e "  ${RED}[x] sshd still not reachable — SSH tunnels will NOT work${NC}"
+                echo -e "  ${DIM}Check: sudo iptables -L -n | grep 22${NC}"
+            fi
+            echo ""
+        fi
+    fi
     # Read stored SSH credentials for URL generation
     if [[ -f /etc/dnstm/ssh-credentials ]]; then
         ssh_user=$(cut -d: -f1 /etc/dnstm/ssh-credentials 2>/dev/null || true)
@@ -5371,6 +5392,37 @@ step_ssh_user() {
     mkdir -p /etc/dnstm 2>/dev/null || true
     echo "${SSH_USER}:${SSH_PASS}" > /etc/dnstm/ssh-credentials
     chmod 600 /etc/dnstm/ssh-credentials
+
+    # Verify and auto-fix sshd reachability on localhost (required for SSH tunnels)
+    if ! timeout 3 bash -c 'echo | nc -w2 127.0.0.1 22' &>/dev/null; then
+        print_warn "sshd NOT reachable on 127.0.0.1:22 — attempting auto-fix..."
+        # Try restarting sshd first
+        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+        sleep 1
+        if ! timeout 3 bash -c 'echo | nc -w2 127.0.0.1 22' &>/dev/null; then
+            # Check if firewall is blocking localhost
+            if command -v iptables &>/dev/null; then
+                # Allow SSH on localhost
+                iptables -I INPUT -i lo -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+                print_info "Added firewall rule: allow SSH on localhost"
+            fi
+            if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
+                ufw allow from 127.0.0.1 to any port 22 2>/dev/null || true
+                print_info "Added UFW rule: allow SSH from localhost"
+            fi
+            sleep 1
+            if timeout 3 bash -c 'echo | nc -w2 127.0.0.1 22' &>/dev/null; then
+                print_ok "sshd now reachable on 127.0.0.1:22"
+            else
+                print_warn "Could not auto-fix — SSH tunnels may not work"
+                print_info "Manually check: sudo iptables -L -n | grep 22"
+            fi
+        else
+            print_ok "sshd now reachable on 127.0.0.1:22 (after restart)"
+        fi
+    else
+        print_ok "sshd reachable on 127.0.0.1:22"
+    fi
 }
 
 # ─── STEP 11: Run Tests ────────────────────────────────────────────────────────
