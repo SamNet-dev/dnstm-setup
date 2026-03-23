@@ -4502,15 +4502,30 @@ step_dns_records() {
         fi
 
         # Validate token
+        # Try /user/tokens/verify first (standard tokens), then fall back to
+        # /accounts (account-scoped tokens like cfat_*) which works universally.
         print_info "Validating API token..."
-        local verify_resp
+        local verify_resp token_status token_valid=false
         verify_resp=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
             -H "Authorization: Bearer ${cf_token}" \
             -H "Content-Type: application/json" --max-time 10 2>/dev/null || true)
-        local token_status
         token_status=$(echo "$verify_resp" | jq -r '.result.status // empty' 2>/dev/null || true)
+        if [[ "$token_status" == "active" ]]; then
+            token_valid=true
+        else
+            # Fall back: account-scoped tokens don't work with /user/tokens/verify.
+            # Check /accounts — a successful response confirms the token is valid.
+            local accounts_resp accounts_success
+            accounts_resp=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts?per_page=1" \
+                -H "Authorization: Bearer ${cf_token}" \
+                -H "Content-Type: application/json" --max-time 10 2>/dev/null || true)
+            accounts_success=$(echo "$accounts_resp" | jq -r '.success // empty' 2>/dev/null || true)
+            if [[ "$accounts_success" == "true" ]]; then
+                token_valid=true
+            fi
+        fi
 
-        if [[ "$token_status" != "active" ]]; then
+        if [[ "$token_valid" != "true" ]]; then
             print_fail "API token is invalid or expired"
             print_info "Check your token at: https://dash.cloudflare.com/profile/api-tokens"
             exit 1
