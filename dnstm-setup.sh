@@ -939,6 +939,25 @@ do_status() {
         s_pass="$socks_pass"
     fi
 
+    # Pre-load domain map from dnstm config.json (most reliable source)
+    local _dnstm_config="/etc/dnstm/config.json"
+    local _domain_map=""
+    if [[ -f "$_dnstm_config" ]]; then
+        if command -v jq &>/dev/null; then
+            _domain_map=$(jq -r '.tunnels[]? | "\(.tag)=\(.domain)"' "$_dnstm_config" 2>/dev/null || true)
+        elif command -v python3 &>/dev/null; then
+            _domain_map=$(python3 -c '
+import sys, json
+try:
+    cfg = json.load(sys.stdin)
+    for t in cfg.get("tunnels", []):
+        tag, domain = t.get("tag",""), t.get("domain","")
+        if tag and domain: print(f"{tag}={domain}")
+except: pass
+' < "$_dnstm_config" 2>/dev/null || true)
+        fi
+    fi
+
     for tag in $tags; do
         # Extract domain for this tunnel from dnstm
         local tag_domain
@@ -946,6 +965,10 @@ do_status() {
         # Fallback: parse table format (TAG TRANSPORT BACKEND PORT DOMAIN STATUS)
         if [[ -z "$tag_domain" ]]; then
             tag_domain=$(echo "$tunnel_list_output" | awk -v t="$tag" '$1 == t {for(i=2;i<=NF;i++) if($i ~ /\./) {print $i; exit}}' || true)
+        fi
+        # Fallback: read domain from dnstm config.json
+        if [[ -z "$tag_domain" && -n "$_domain_map" ]]; then
+            tag_domain=$(echo "$_domain_map" | grep "^${tag}=" | head -1 | sed 's/^[^=]*=//' || true)
         fi
         if [[ -z "$tag_domain" ]]; then
             continue
