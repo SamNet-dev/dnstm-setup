@@ -632,7 +632,7 @@ show_about() {
 # Returns 0 if auth is enabled, 1 otherwise.
 detect_socks_auth() {
     local status_output
-    status_output=$(dnstm backend status -t socks 2>/dev/null || true)
+    status_output=$(timeout --kill-after=3 10 dnstm backend status -t socks 2>/dev/null || true)
     local detected_user detected_pass
     detected_user=$(echo "$status_output" | sed -n 's/^[[:space:]]*User:[[:space:]]*//p' | sed 's/[[:space:]]*$//' || true)
     detected_pass=$(echo "$status_output" | sed -n 's/^[[:space:]]*Password:[[:space:]]*//p' | sed 's/[[:space:]]*$//' || true)
@@ -803,7 +803,7 @@ do_status() {
 
     # ─── Cache tunnel list output (reused throughout) ───
     local tunnel_list_output
-    tunnel_list_output=$(dnstm tunnel list 2>/dev/null || true)
+    tunnel_list_output=$(timeout --kill-after=3 10 dnstm tunnel list 2>/dev/null || true)
 
     echo -e "  ${BOLD}Tunnel Status${NC}"
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
@@ -856,7 +856,7 @@ do_status() {
     local has_ssh_users=false
     if command -v sshtun-user &>/dev/null; then
         local user_list
-        user_list=$(timeout 10 sshtun-user list </dev/null 2>/dev/null || true)
+        user_list=$(timeout --kill-after=3 10 sshtun-user list </dev/null 2>/dev/null || true)
         # Fallback: sshtun-user list may require TTY
         if [[ -z "$user_list" ]]; then
             user_list=$(awk -F: '/SSH tunnel only/{print $1}' /etc/passwd 2>/dev/null || true)
@@ -905,7 +905,7 @@ do_status() {
     for tag in $tags; do
         # SOCKS tunnels — no SSH credentials needed
         if echo "$tag" | grep -qE '^(slip[0-9]+|dnstt[0-9]+|noiz[0-9]+)$'; then
-            share_url=$(dnstm tunnel share -t "$tag" 2>/dev/null || true)
+            share_url=$(timeout --kill-after=3 10 dnstm tunnel share -t "$tag" 2>/dev/null || true)
             if [[ -n "$share_url" ]]; then
                 echo -e "  ${GREEN}${tag}:${NC}"
                 echo "  ${share_url}"
