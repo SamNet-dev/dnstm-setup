@@ -2376,7 +2376,7 @@ do_manage_users() {
         if [[ -f /etc/ssh/sshd_config ]]; then
             cp -f /etc/ssh/sshd_config /etc/ssh/sshd_config.dnstm-backup 2>/dev/null || true
         fi
-        if timeout 30 sshtun-user configure </dev/null 2>&1; then
+        if timeout --kill-after=3 30 sshtun-user configure </dev/null 2>&1; then
             print_ok "SSH configuration applied"
         else
             print_warn "SSH configuration may not have applied fully — user management may have issues"
@@ -2415,7 +2415,7 @@ do_manage_users() {
                 echo ""
                 print_info "SSH tunnel users:"
                 echo ""
-                if ! timeout 10 sshtun-user list 2>/dev/null; then
+                if ! timeout --kill-after=3 10 sshtun-user list </dev/null 2>/dev/null; then
                     # Fallback: sshtun-user list requires TTY on some versions
                     local tun_users
                     tun_users=$(awk -F: '/SSH tunnel only/{print $1}' /etc/passwd 2>/dev/null)
@@ -2450,14 +2450,14 @@ do_manage_users() {
                 echo ""
                 local user_created=false
                 if [[ -n "$new_pass" ]]; then
-                    if timeout 30 sshtun-user create "$new_user" --insecure-password "$new_pass" 2>&1; then
+                    if timeout --kill-after=3 30 sshtun-user create "$new_user" --insecure-password "$new_pass" </dev/null 2>&1; then
                         print_ok "User '${new_user}' created"
                         user_created=true
                     else
                         print_fail "Failed to create user '${new_user}' (command timed out or failed)"
                     fi
                 else
-                    if timeout 30 sshtun-user create "$new_user" </dev/null 2>&1; then
+                    if timeout --kill-after=3 30 sshtun-user create "$new_user" </dev/null 2>&1; then
                         print_ok "User '${new_user}' created (random password assigned)"
                         user_created=true
                     else
@@ -2469,7 +2469,7 @@ do_manage_users() {
                 if [[ "$user_created" == true ]]; then
                     local final_pass="$new_pass"
                     if [[ -z "$final_pass" ]]; then
-                        final_pass=$(sshtun-user show "$new_user" 2>/dev/null | grep -i pass | awk '{print $NF}' || true)
+                        final_pass=$(timeout --kill-after=3 10 sshtun-user show "$new_user" </dev/null 2>/dev/null | grep -i pass | awk '{print $NF}' || true)
                     fi
                     if [[ -n "$final_pass" ]]; then
                         # Store credentials (root-only) for status page
@@ -2555,7 +2555,7 @@ do_manage_users() {
                     continue
                 fi
                 echo ""
-                if timeout 30 sshtun-user update "$upd_user" --insecure-password "$upd_pass" 2>&1; then
+                if timeout --kill-after=3 30 sshtun-user update "$upd_user" --insecure-password "$upd_pass" </dev/null 2>&1; then
                     print_ok "Password updated for '${upd_user}'"
                     # Update stored credentials
                     mkdir -p /etc/dnstm 2>/dev/null || true
@@ -2579,7 +2579,7 @@ do_manage_users() {
                     continue
                 fi
                 if prompt_yn "Are you sure you want to delete '${del_user}'?" "n"; then
-                    if timeout 30 sshtun-user delete "$del_user" 2>&1; then
+                    if timeout --kill-after=3 30 sshtun-user delete "$del_user" </dev/null 2>&1; then
                         print_ok "User '${del_user}' deleted"
                         # Remove stored credentials if they match
                         if [[ -f /etc/dnstm/ssh-credentials ]]; then
@@ -5373,7 +5373,7 @@ step_ssh_user() {
     fi
 
     local configure_output
-    configure_output=$(timeout 30 sshtun-user configure </dev/null 2>&1) || true
+    configure_output=$(timeout --kill-after=3 30 sshtun-user configure </dev/null 2>&1) || true
     if echo "$configure_output" | grep -qi "already"; then
         print_ok "SSH already configured"
     elif echo "$configure_output" | grep -qi "error\|fail"; then
@@ -5425,7 +5425,7 @@ step_ssh_user() {
 
     # Create user
     print_info "Creating SSH tunnel user: ${SSH_USER}..."
-    if timeout 30 sshtun-user create "$SSH_USER" --insecure-password "$SSH_PASS" </dev/null 2>&1; then
+    if timeout --kill-after=3 30 sshtun-user create "$SSH_USER" --insecure-password "$SSH_PASS" </dev/null 2>&1; then
         SSH_SETUP_DONE=true
         print_ok "SSH tunnel user created: ${SSH_USER}"
     else
