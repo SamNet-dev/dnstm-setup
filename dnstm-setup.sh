@@ -540,6 +540,7 @@ show_help() {
     echo "  sudo bash dnstm-setup.sh --harden      Apply security hardening only"
     echo "  sudo bash dnstm-setup.sh --uninstall   Remove everything"
     echo "  sudo bash dnstm-setup.sh --status      Show all tunnels & share URLs"
+    echo "  sudo bash dnstm-setup.sh --monitor     Monitor tunnel usage & connections"
     echo "  bash dnstm-setup.sh --help             Show this help"
     echo "  bash dnstm-setup.sh --about            Show project info"
     echo ""
@@ -548,6 +549,7 @@ show_help() {
     echo "  --about        Show project information and credits"
     echo "  --manage       Interactive management menu (all post-setup actions)"
     echo "  --status       Show all tunnels, credentials, and share URLs"
+    echo "  --monitor      Show tunnel process stats, connections, and recent logs"
     echo "  --add-tunnel   Add a single tunnel (interactive: choose transport, backend, domain)"
     echo "  --add-xray     Connect existing 3x-ui panel to DNS tunnel (auto-detect + create inbound)"
     echo "  --remove-tunnel [tag]  Remove a specific tunnel (interactive if no tag given)"
@@ -1093,6 +1095,176 @@ except: pass
 
     # Restore global DOMAIN
     DOMAIN="$_saved_domain"
+}
+
+# ─── --monitor ─────────────────────────────────────────────────────────────────
+
+do_monitor() {
+    banner
+
+    if [[ $EUID -ne 0 ]]; then
+        print_warn "Running without root — some info may be unavailable"
+        echo ""
+    fi
+
+    if ! command -v dnstm &>/dev/null; then
+        print_fail "dnstm is not installed. Run the full setup first: sudo bash $0"
+        exit 1
+    fi
+
+    local tunnel_list_output
+    tunnel_list_output=$(timeout --kill-after=3 10 dnstm tunnel list 2>/dev/null || true)
+
+    if [[ -z "$tunnel_list_output" ]]; then
+        print_warn "No tunnels found"
+        return
+    fi
+
+    # ─── Tunnel process stats ───
+    echo -e "  ${BOLD}Tunnel Process Stats${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+    printf "  ${BOLD}%-16s %-10s %-8s %-10s %-10s %-s${NC}\n" "TAG" "PID" "CPU%" "MEM(MB)" "UPTIME" "STATUS"
+    echo -e "  ${DIM}$(printf '%.0s─' {1..76})${NC}"
+
+    # Extract tags from tunnel list
+    local tags
+    tags=$(echo "$tunnel_list_output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
+    if [[ -z "$tags" ]]; then
+        tags=$(echo "$tunnel_list_output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true)
+    fi
+
+    # Pre-fetch constants used in the loop (avoid forking per tunnel)
+    local _clk_tck _boot_time_s _now_s
+    _clk_tck=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    _boot_time_s=$(awk '/^btime/{print $2}' /proc/stat 2>/dev/null || true)
+    _now_s=$(date +%s)
+
+    local total_conns=0 total_mem=0
+    for tag in $tags; do
+        local pid="" cpu="" mem_kb="" mem_mb="" uptime="" status=""
+
+        # Check if tunnel is running from the list output
+        local tag_line
+        tag_line=$(echo "$tunnel_list_output" | grep -wF "$tag" | head -1)
+        if echo "$tag_line" | grep -qi "stopped\|inactive"; then
+            printf "  %-16s %-10s %-8s %-10s %-10s ${RED}%s${NC}\n" "$tag" "-" "-" "-" "-" "Stopped"
+            continue
+        fi
+
+        # Find PID: look for process with this tag in its command line
+        pid=$(pgrep -f "tag[= ]${tag}" 2>/dev/null | head -1 || true)
+        if [[ -z "$pid" ]]; then
+            pid=$(systemctl show "dnstm-tunnel-${tag}" --property=MainPID 2>/dev/null | sed 's/MainPID=//' || true)
+            [[ "$pid" == "0" ]] && pid=""
+        fi
+
+        if [[ -n "$pid" ]]; then
+            # Single ps call for both CPU and memory
+            read -r cpu mem_kb <<< "$(ps -p "$pid" -o %cpu=,rss= 2>/dev/null || true)"
+            if [[ -n "$mem_kb" && "$mem_kb" -gt 0 ]] 2>/dev/null; then
+                local _m=$((mem_kb * 10 / 1024)); mem_mb="$((_m / 10)).$((_m % 10))"
+                total_mem=$((total_mem + mem_kb))
+            else
+                mem_mb="-"
+            fi
+
+            # Get uptime from /proc (uses pre-fetched constants)
+            if [[ -f "/proc/${pid}/stat" && -n "$_boot_time_s" ]]; then
+                local start_time elapsed_s
+                start_time=$(awk '{print $22}' "/proc/${pid}/stat" 2>/dev/null || true)
+                if [[ -n "$start_time" ]]; then
+                    elapsed_s=$(( _now_s - (_boot_time_s + start_time / _clk_tck) ))
+                    [[ $elapsed_s -lt 0 ]] && elapsed_s=0
+                    if [[ $elapsed_s -ge 86400 ]]; then
+                        uptime="$((elapsed_s / 86400))d $((elapsed_s % 86400 / 3600))h"
+                    elif [[ $elapsed_s -ge 3600 ]]; then
+                        uptime="$((elapsed_s / 3600))h $((elapsed_s % 3600 / 60))m"
+                    else
+                        uptime="$((elapsed_s / 60))m $((elapsed_s % 60))s"
+                    fi
+                fi
+            fi
+            [[ -z "$uptime" ]] && uptime="-"
+            [[ -z "$cpu" ]] && cpu="-"
+            printf "  %-16s %-10s %-8s %-10s %-10s ${GREEN}%s${NC}\n" "$tag" "$pid" "$cpu" "$mem_mb" "$uptime" "Running"
+        else
+            if echo "$tag_line" | grep -qi "running"; then
+                printf "  %-16s %-10s %-8s %-10s %-10s ${YELLOW}%s${NC}\n" "$tag" "?" "-" "-" "-" "Running (no PID)"
+            else
+                printf "  %-16s %-10s %-8s %-10s %-10s ${RED}%s${NC}\n" "$tag" "-" "-" "-" "-" "Unknown"
+            fi
+        fi
+    done
+    echo ""
+
+    # ─── Active connections (single ss calls, cached) ───
+    echo -e "  ${BOLD}Active Connections${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+
+    local ss_tcp_output ss_listen_output ss_udp_output
+    ss_listen_output=$(ss -tlnp 2>/dev/null || true)
+    ss_tcp_output=$(ss -tnp 2>/dev/null || true)
+    ss_udp_output=$(ss -unp 2>/dev/null || true)
+
+    # Count SOCKS proxy connections (microsocks)
+    local socks_port=""
+    socks_port=$(echo "$ss_listen_output" | grep microsocks | awk '{for(i=1;i<=NF;i++) if($i ~ /:[0-9]+$/) {split($i,a,":"); print a[length(a)]; exit}}' || true)
+    if [[ -n "$socks_port" ]]; then
+        local socks_conns
+        socks_conns=$(echo "$ss_tcp_output" | grep ":${socks_port}\b" | grep -c "ESTAB" || true)
+        echo -e "  SOCKS proxy (port ${socks_port}):  ${GREEN}${socks_conns:-0}${NC} active connections"
+        total_conns=$((total_conns + ${socks_conns:-0}))
+    fi
+
+    # Count SSH tunnel connections
+    local ssh_conns
+    ssh_conns=$(echo "$ss_tcp_output" | grep ":22\b" | grep -c "ESTAB" || true)
+    if [[ "${ssh_conns:-0}" -gt 0 ]]; then
+        echo -e "  SSH tunnels (port 22):     ${GREEN}${ssh_conns}${NC} active connections"
+        total_conns=$((total_conns + ssh_conns))
+    fi
+
+    # DNS listener (port 53)
+    local dns_conns
+    dns_conns=$(echo "$ss_udp_output" | grep -c ":53\b" || true)
+    if [[ "${dns_conns:-0}" -gt 0 ]]; then
+        echo -e "  DNS listener (port 53):    ${GREEN}${dns_conns}${NC} UDP sessions"
+    fi
+
+    echo -e "  ${DIM}──────────────────────────${NC}"
+    echo -e "  Total:                     ${BOLD}${total_conns}${NC} TCP connections"
+    echo ""
+
+    # ─── Memory summary ───
+    if [[ $total_mem -gt 0 ]]; then
+        local _tm=$((total_mem * 10 / 1024)); local total_mem_mb="$((_tm / 10)).$((_tm % 10))"
+        echo -e "  ${BOLD}Total tunnel memory:${NC} ${GREEN}${total_mem_mb} MB${NC}"
+        echo ""
+    fi
+
+    # ─── Recent tunnel logs ───
+    echo -e "  ${BOLD}Recent Tunnel Activity (last 20 lines)${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+    local has_logs=false
+    if command -v journalctl &>/dev/null; then
+        local log_output
+        log_output=$(journalctl -u 'dnstm*' --no-pager -n 20 --no-hostname 2>/dev/null || true)
+        if [[ -n "$log_output" && "$log_output" != *"No entries"* && "$log_output" != *"-- No entries --"* ]]; then
+            echo "$log_output" | while IFS= read -r line; do
+                echo -e "  ${DIM}${line}${NC}"
+            done
+            has_logs=true
+        fi
+    fi
+    if [[ "$has_logs" == false ]]; then
+        echo -e "  ${DIM}No recent logs available${NC}"
+        echo -e "  ${DIM}Try: dnstm tunnel logs --tag <tag>${NC}"
+    fi
+    echo ""
+
+    echo -e "  ${DIM}Tip: Run with watch for live monitoring:${NC}"
+    echo -e "  ${DIM}  watch -n 5 sudo bash $0 --monitor${NC}"
+    echo ""
 }
 
 # ─── SlipNet URL Generator ────────────────────────────────────────────────────
@@ -6403,6 +6575,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --status)
             do_status
+            exit 0
+            ;;
+        --monitor)
+            do_monitor
             exit 0
             ;;
         --manage)
