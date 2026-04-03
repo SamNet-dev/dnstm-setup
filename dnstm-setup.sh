@@ -2,7 +2,7 @@
 #
 # dnstm-setup v1.3.1
 # Interactive DNS Tunnel Setup
-# Sets up Slipstream + DNSTT + NoizDNS tunnels for censorship-resistant internet access
+# Sets up Slipstream + DNSTT + NoizDNS + VayDNS tunnels for censorship-resistant internet access
 #
 # Made By SamNet Technologies - Saman
 # GitHub: github.com/SamNet-dev/dnstm-setup
@@ -145,14 +145,14 @@ dnstm_get_tags() {
         return
     fi
     # Fallback: extract known tag patterns (slip*, dnstt*, noiz*, xray*)
-    echo "$output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true
+    echo "$output" | grep -oE '\b(slip|dnstt|noiz|vay|xray)[a-z0-9_-]*' | sort -u || true
 }
 
 # Check if any tunnels exist
 dnstm_has_tunnels() {
     local output
     output=$(dnstm tunnel list 2>/dev/null || true)
-    [[ -n "$output" ]] && echo "$output" | grep -qiE 'tag=|slip|dnstt|noiz|xray'
+    [[ -n "$output" ]] && echo "$output" | grep -qiE 'tag=|slip|dnstt|noiz|vay|xray'
 }
 
 prompt_yn() {
@@ -567,8 +567,10 @@ show_help() {
     echo "  2. DNSTT + SOCKS tunnel       (classic, ~42 KB/s)"
     echo "  3. Slipstream + SSH tunnel    (SSH over DNS)"
     echo "  4. DNSTT + SSH tunnel         (SSH over DNSTT)"
-    echo "  5. microsocks SOCKS5 proxy    (auto-installed by dnstm)"
-    echo "  6. SSH tunnel user (optional)"
+    echo "  5. VayDNS + SOCKS tunnel     (optimized)"
+    echo "  6. VayDNS + SSH tunnel       (optimized SSH)"
+    echo "  7. microsocks SOCKS5 proxy    (auto-installed by dnstm)"
+    echo "  8. SSH tunnel user (optional)"
     echo ""
     echo -e "${BOLD}CLIENT APP${NC}"
     echo "  SlipNet (Android): https://github.com/anonvector/SlipNet/releases"
@@ -848,7 +850,7 @@ do_status() {
     tags=$(echo "$tunnel_list_output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
     # Fallback: extract known tag patterns if tag= format not found
     if [[ -z "$tags" ]] && [[ -n "$tunnel_list_output" ]]; then
-        tags=$(echo "$tunnel_list_output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true)
+        tags=$(echo "$tunnel_list_output" | grep -oE '\b(slip|dnstt|noiz|vay|xray)[a-z0-9_-]*' | sort -u || true)
     fi
     if [[ -z "$tags" ]]; then
         print_warn "No tunnels found"
@@ -908,7 +910,7 @@ do_status() {
     local share_url
     for tag in $tags; do
         # SOCKS tunnels — no SSH credentials needed
-        if echo "$tag" | grep -qE '^(slip[0-9]+|dnstt[0-9]+|noiz[0-9]+)$'; then
+        if echo "$tag" | grep -qE '^(slip[0-9]+|dnstt[0-9]+|noiz[0-9]+|vay[0-9]+)$'; then
             share_url=$(timeout --kill-after=3 10 dnstm tunnel share -t "$tag" 2>/dev/null || true)
             if [[ -n "$share_url" ]]; then
                 echo -e "  ${GREEN}${tag}:${NC}"
@@ -1046,6 +1048,22 @@ except: pass
                     continue
                 fi
                 ;;
+            vay[0-9]*)
+                if [[ -n "$pubkey" ]]; then
+                    url=$(generate_slipnet_url "dnstt" "$subdomain" "$pubkey" "" "" "$s_user" "$s_pass")
+                fi
+                ;;
+            vay-ssh*)
+                if [[ -n "$ssh_user" && -n "$ssh_pass" ]]; then
+                    url=$(generate_slipnet_url "dnstt_ssh" "$subdomain" "$pubkey" "$ssh_user" "$ssh_pass" "$s_user" "$s_pass")
+                elif [[ "$has_ssh_users" == true ]]; then
+                    echo -e "  ${DIM}${tag}: regenerate with — sudo bash $0 --users (option 5)${NC}"
+                    continue
+                else
+                    echo -e "  ${DIM}${tag}: create SSH user first — sudo bash $0 --users${NC}"
+                    continue
+                fi
+                ;;
         esac
 
         if [[ -n "$url" ]]; then
@@ -1132,7 +1150,7 @@ do_monitor() {
     local tags
     tags=$(echo "$tunnel_list_output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
     if [[ -z "$tags" ]]; then
-        tags=$(echo "$tunnel_list_output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true)
+        tags=$(echo "$tunnel_list_output" | grep -oE '\b(slip|dnstt|noiz|vay|xray)[a-z0-9_-]*' | sort -u || true)
     fi
 
     # Pre-fetch constants used in the loop (avoid forking per tunnel)
@@ -1322,6 +1340,19 @@ do_diag() {
         print_info "noizdns-server not installed (NoizDNS tunnels skipped)"
     fi
 
+    if [[ -x /usr/local/bin/vaydns-server ]]; then
+        local magic
+        magic=$(xxd -l4 -p /usr/local/bin/vaydns-server 2>/dev/null || od -A n -t x1 -N4 /usr/local/bin/vaydns-server 2>/dev/null | tr -d ' ' || true)
+        if [[ "$magic" == "7f454c46" ]]; then
+            print_ok "vaydns-server binary valid (ELF)"
+        else
+            print_fail "vaydns-server binary is corrupt (not a valid ELF)"
+            issues=$((issues + 1))
+        fi
+    else
+        print_info "vaydns-server not installed (VayDNS tunnels skipped)"
+    fi
+
     if [[ -x /usr/local/bin/microsocks ]] || command -v microsocks &>/dev/null; then
         print_ok "microsocks installed"
     else
@@ -1358,7 +1389,7 @@ do_diag() {
     local tags
     tags=$(echo "$tunnel_list_output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
     if [[ -z "$tags" ]]; then
-        tags=$(echo "$tunnel_list_output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true)
+        tags=$(echo "$tunnel_list_output" | grep -oE '\b(slip|dnstt|noiz|vay|xray)[a-z0-9_-]*' | sort -u || true)
     fi
 
     for tag in $tags; do
@@ -1414,6 +1445,32 @@ do_diag() {
         echo ""
     fi
 
+    local has_vay=false
+    for tag in $tags; do
+        [[ "$tag" == vay* ]] && has_vay=true && break
+    done
+    if [[ "$has_vay" == true ]]; then
+        echo -e "  ${BOLD}VayDNS Configuration${NC}"
+        echo -e "  ${DIM}──────────────────────────${NC}"
+        for tag in $tags; do
+            [[ "$tag" != vay* ]] && continue
+            local dropin="/etc/systemd/system/dnstm-${tag}.service.d/10-vaydns-binary.conf"
+            if [[ -f "$dropin" ]]; then
+                if grep -q "vaydns-server" "$dropin" 2>/dev/null; then
+                    print_ok "${tag}: binary override present (vaydns-server)"
+                else
+                    print_fail "${tag}: override exists but doesn't reference vaydns-server"
+                    issues=$((issues + 1))
+                fi
+            else
+                print_fail "${tag}: no binary override — running dnstt-server instead of vaydns-server"
+                echo -e "    ${DIM}Fix: re-run setup or: create_vaydns_service_override ${tag}${NC}"
+                issues=$((issues + 1))
+            fi
+        done
+        echo ""
+    fi
+
     # ─── Config.json transport check ───
     local section_num=3
     [[ "$has_noiz" == true ]] && section_num=4
@@ -1430,7 +1487,7 @@ do_diag() {
                 echo "$tunnel_info" | while IFS='|' read -r t_tag t_transport t_domain t_mtu; do
                     local col="$GREEN"
                     # Flag potential issues
-                    if [[ "$t_tag" == noiz* && "$t_transport" == "dnstt" ]]; then
+                    if [[ ( "$t_tag" == noiz* || "$t_tag" == vay* ) && "$t_transport" == "dnstt" ]]; then
                         # Could be fine (older dnstm) or wrong (newer dnstm)
                         col="$YELLOW"
                     fi
@@ -1453,20 +1510,20 @@ except: pass
         # Check for MTU issues (DNSTT/NoizDNS tunnels)
         local high_mtu_tags=""
         if command -v jq &>/dev/null; then
-            high_mtu_tags=$(jq -r '.tunnels[]? | select(.transport == "dnstt" or .transport == "noizdns") | select(.mtu > 1000) | .tag' "$config" 2>/dev/null || true)
+            high_mtu_tags=$(jq -r '.tunnels[]? | select(.transport == "dnstt" or .transport == "noizdns" or .transport == "vaydns") | select(.mtu > 1000) | .tag' "$config" 2>/dev/null || true)
         elif command -v python3 &>/dev/null; then
             high_mtu_tags=$(python3 -c '
 import sys, json
 try:
     for t in json.load(sys.stdin).get("tunnels", []):
-        if t.get("transport","") in ("dnstt","noizdns") and t.get("mtu",0) > 1000:
+        if t.get("transport","") in ("dnstt","noizdns","vaydns") and t.get("mtu",0) > 1000:
             print(t["tag"])
 except: pass
 ' < "$config" 2>/dev/null || true)
         fi
         if [[ -n "$high_mtu_tags" ]]; then
             echo ""
-            print_warn "High MTU detected on DNSTT/NoizDNS tunnels (may cause data issues):"
+            print_warn "High MTU detected on DNSTT/NoizDNS/VayDNS tunnels (may cause data issues):"
             for t in $high_mtu_tags; do
                 echo -e "    ${YELLOW}${t}${NC} — try reducing MTU to 800-1000 if data doesn't flow"
             done
@@ -1650,7 +1707,7 @@ except: pass
     if [[ $issues -eq 0 ]]; then
         echo -e "  ${GREEN}${BOLD}All checks passed — no issues found${NC}"
         echo ""
-        echo -e "  ${DIM}If DNSTT/NoizDNS tunnels connect but don't transmit data, try lower MTU.${NC}"
+        echo -e "  ${DIM}If DNSTT/NoizDNS/VayDNS tunnels connect but don't transmit data, try lower MTU.${NC}"
         echo -e "  ${DIM}See: https://github.com/SamNet-dev/dnstm-setup/issues/35${NC}"
     else
         echo -e "  ${RED}${BOLD}Found ${issues} issue(s)${NC}"
@@ -2087,7 +2144,7 @@ do_change_mtu() {
     local all_tags
     all_tags=$(echo "$tunnel_output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
     [[ -z "$all_tags" && -n "$tunnel_output" ]] && \
-        all_tags=$(echo "$tunnel_output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true)
+        all_tags=$(echo "$tunnel_output" | grep -oE '\b(slip|dnstt|noiz|vay|xray)[a-z0-9_-]*' | sort -u || true)
 
     # Method 1: Find services containing dnstt-server in ExecStart
     for svc_file in $svc_files; do
@@ -2288,7 +2345,7 @@ do_remove_tunnel() {
         local tags
         tags=$(echo "$tunnel_output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
         [[ -z "$tags" && -n "$tunnel_output" ]] && \
-            tags=$(echo "$tunnel_output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true)
+            tags=$(echo "$tunnel_output" | grep -oE '\b(slip|dnstt|noiz|vay|xray)[a-z0-9_-]*' | sort -u || true)
         if [[ -z "$tags" ]]; then
             print_warn "No tunnels found."
             exit 0
@@ -2329,7 +2386,7 @@ do_remove_tunnel() {
         local _avail_tags
         _avail_tags=$(echo "$tunnel_output" | grep -oE 'tag=[^ ]+' | sed 's/tag=//' || true)
         [[ -z "$_avail_tags" && -n "$tunnel_output" ]] && \
-            _avail_tags=$(echo "$tunnel_output" | grep -oE '\b(slip|dnstt|noiz|xray)[a-z0-9_-]*' | sort -u || true)
+            _avail_tags=$(echo "$tunnel_output" | grep -oE '\b(slip|dnstt|noiz|vay|xray)[a-z0-9_-]*' | sort -u || true)
         echo "$_avail_tags" | sed 's/^/  /' || true
         exit 1
     fi
@@ -2377,6 +2434,12 @@ do_remove_tunnel() {
         rmdir "/etc/systemd/system/dnstm-${target_tag}.service.d" 2>/dev/null || true
         systemctl daemon-reload 2>/dev/null || true
         print_ok "Cleaned up NoizDNS override for ${target_tag}"
+    fi
+
+    if [[ "$target_tag" == vay* ]]; then
+        rm -f "/etc/systemd/system/dnstm-${target_tag}.service.d/10-vaydns-binary.conf" 2>/dev/null || true
+        rmdir "/etc/systemd/system/dnstm-${target_tag}.service.d" 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
     fi
 
     # Restart router only if tunnels remain
@@ -2439,29 +2502,38 @@ do_add_tunnel() {
     echo -e "  ${BOLD}1)${NC}  Slipstream  ${DIM}(QUIC + TLS, faster ~63 KB/s)${NC}"
     echo -e "  ${BOLD}2)${NC}  DNSTT       ${DIM}(Noise + Curve25519, ~42 KB/s)${NC}"
     echo -e "  ${BOLD}3)${NC}  NoizDNS     ${DIM}(DPI-resistant DNSTT fork)${NC}"
+    echo -e "  ${BOLD}4)${NC}  VayDNS      ${DIM}(optimized DNSTT fork, KCP/smux)${NC}"
     echo ""
     local transport_choice
-    transport_choice=$(prompt_input "Select transport (1-3)" "1")
+    transport_choice=$(prompt_input "Select transport (1-4)" "1")
     local transport
     local use_noizdns=false
+    local use_vaydns=false
     case "$transport_choice" in
         1) transport="slipstream" ;;
         2) transport="dnstt" ;;
         3)
             transport="dnstt"
             use_noizdns=true
-            # Ensure noizdns binary is available
             if ! ensure_noizdns_binary; then
                 print_fail "NoizDNS binary not available. Cannot create NoizDNS tunnel."
                 exit 1
             fi
             ;;
+        4)
+            transport="dnstt"
+            use_vaydns=true
+            if ! ensure_vaydns_binary; then
+                print_fail "VayDNS binary not available. Cannot create VayDNS tunnel."
+                exit 1
+            fi
+            ;;
         *)
-            print_fail "Invalid selection. Use 1, 2, or 3."
+            print_fail "Invalid selection. Use 1, 2, 3, or 4."
             exit 1
             ;;
     esac
-    print_ok "Transport: ${transport}$( [[ "$use_noizdns" == true ]] && echo ' (NoizDNS)' )"
+    print_ok "Transport: ${transport}$( [[ "$use_noizdns" == true ]] && echo ' (NoizDNS)' )$( [[ "$use_vaydns" == true ]] && echo ' (VayDNS)' )"
     echo ""
 
     # 2. Choose backend
@@ -2558,7 +2630,12 @@ do_add_tunnel() {
     # Apply NoizDNS override if selected
     if [[ "$use_noizdns" == true ]]; then
         create_noizdns_service_override "$tag" || print_warn "Could not set NoizDNS binary for ${tag}"
-        # Stop tunnel so it restarts with noizdns-server binary
+        systemctl stop "dnstm-${tag}.service" 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+
+    if [[ "$use_vaydns" == true ]]; then
+        create_vaydns_service_override "$tag" || print_warn "Could not set VayDNS binary for ${tag}"
         systemctl stop "dnstm-${tag}.service" 2>/dev/null || true
         systemctl daemon-reload 2>/dev/null || true
     fi
@@ -2631,6 +2708,8 @@ do_add_tunnel() {
         esac
         # NoizDNS tunnels use dnstt transport but need sayedns type for SlipNet
         [[ "$use_noizdns" == true || "$tag" == noiz* ]] && slipnet_type="sayedns"
+        # VayDNS tunnels use dnstt type (server runs in -dnstt-compat mode)
+        [[ "$use_vaydns" == true || "$tag" == vay* ]] && slipnet_type="dnstt"
 
         DOMAIN="$base_domain"
         local slipnet_url
@@ -2821,6 +2900,11 @@ do_uninstall() {
         print_ok "Removed /usr/local/bin/noizdns-server"
     fi
 
+    if [[ -f /usr/local/bin/vaydns-server ]]; then
+        rm -f /usr/local/bin/vaydns-server
+        print_ok "Removed /usr/local/bin/vaydns-server"
+    fi
+
     if [[ -f /usr/local/bin/dnstm-setup ]]; then
         rm -f /usr/local/bin/dnstm-setup
         print_ok "Removed /usr/local/bin/dnstm-setup"
@@ -2843,6 +2927,7 @@ do_uninstall() {
     find /etc/systemd/system -maxdepth 2 -type f -name '20-hardening.conf' -path '*/dnstm-*.service.d/*' -delete 2>/dev/null || true
     find /etc/systemd/system -maxdepth 2 -type f -name '10-xray-upstream.conf' -path '*/dnstm-*.service.d/*' -delete 2>/dev/null || true
     find /etc/systemd/system -maxdepth 2 -type f -name '10-noizdns-binary.conf' -path '*/dnstm-*.service.d/*' -delete 2>/dev/null || true
+    find /etc/systemd/system -maxdepth 2 -type f -name '10-vaydns-binary.conf' -path '*/dnstm-*.service.d/*' -delete 2>/dev/null || true
     rm -f /etc/systemd/system/microsocks.service.d/20-hardening.conf 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
     print_ok "Removed local service hardening drop-ins"
@@ -4335,6 +4420,173 @@ EOF
     print_ok "NoizDNS binary override (PT mode): ${service}"
 }
 
+# ─── VayDNS Binary Download ──────────────────────────────────────────────────
+
+# Download and verify the VayDNS server binary if not already installed.
+# Returns 0 if binary is available (already existed or freshly downloaded), 1 otherwise.
+ensure_vaydns_binary() {
+    local _is_elf=false
+    if [[ -x /usr/local/bin/vaydns-server ]]; then
+        if command -v file &>/dev/null; then
+            file /usr/local/bin/vaydns-server 2>/dev/null | grep -qi "ELF" && _is_elf=true
+        fi
+        if [[ "$_is_elf" != true ]]; then
+            local _magic
+            _magic=$(xxd -l 4 -p /usr/local/bin/vaydns-server 2>/dev/null || od -A n -t x1 -N 4 /usr/local/bin/vaydns-server 2>/dev/null | tr -d ' ')
+            [[ "$_magic" == "7f454c46" ]] && _is_elf=true
+        fi
+        if [[ "$_is_elf" == true ]]; then
+            return 0
+        fi
+        print_warn "Existing VayDNS binary is invalid — re-downloading..."
+        rm -f /usr/local/bin/vaydns-server
+    fi
+
+    print_info "Downloading VayDNS server (optimized DNS tunnel)..."
+
+    local arch
+    arch=$(detect_architecture)
+
+    local vaydns_downloaded=false
+    local vaydns_own_url="https://github.com/SamNet-dev/dnstm-setup/releases/download/vaydns-v1.0/vaydns-server-linux-${arch}"
+    local vaydns_release_url="https://github.com/net2share/vaydns/releases/latest/download/vaydns-server-linux-${arch}"
+
+    if curl -fSL --progress-bar --connect-timeout 10 --max-time 60 -o /usr/local/bin/vaydns-server "$vaydns_own_url" 2>/dev/null; then
+        vaydns_downloaded=true
+    elif curl -fSL --progress-bar --connect-timeout 10 --max-time 60 -o /usr/local/bin/vaydns-server "$vaydns_release_url" 2>/dev/null; then
+        vaydns_downloaded=true
+    fi
+
+    if [[ "$vaydns_downloaded" == true ]]; then
+        chmod +x /usr/local/bin/vaydns-server
+        if [[ ! -s /usr/local/bin/vaydns-server ]]; then
+            print_warn "VayDNS binary is empty (download may have failed)"
+            rm -f /usr/local/bin/vaydns-server
+            return 1
+        fi
+        local magic
+        magic=$(xxd -l 4 -p /usr/local/bin/vaydns-server 2>/dev/null || od -A n -t x1 -N 4 /usr/local/bin/vaydns-server 2>/dev/null | tr -d ' ')
+        if [[ "$magic" == "7f454c46" ]]; then
+            print_ok "VayDNS server installed and verified"
+            return 0
+        else
+            print_warn "VayDNS binary is not a valid ELF executable"
+            rm -f /usr/local/bin/vaydns-server
+            return 1
+        fi
+    else
+        print_warn "Could not download VayDNS server (GitHub may be blocked)"
+        print_info "Manual install: curl -fsSL -o /usr/local/bin/vaydns-server ${vaydns_release_url} && chmod +x /usr/local/bin/vaydns-server"
+        return 1
+    fi
+}
+
+# Fix VayDNS tunnel transport in dnstm config.json.
+# Newer dnstm may support "vaydns" as a transport type; older only knows "dnstt".
+fix_vaydns_transport() {
+    local config="/etc/dnstm/config.json"
+    [[ -f "$config" ]] || return 0
+    command -v jq &>/dev/null || return 0
+
+    local supports_vaydns=false
+    if dnstm tunnel add --help 2>&1 | grep -qi "vaydns" || \
+       dnstm --help 2>&1 | grep -qi "vaydns"; then
+        supports_vaydns=true
+    fi
+
+    local changed=false
+    local tmp_config="${config}.tmp.$$"
+
+    if [[ "$supports_vaydns" == true ]]; then
+        if jq -e '.tunnels[]? | select(.tag | test("^vay")) | select(.transport == "dnstt")' "$config" &>/dev/null; then
+            if jq '(.tunnels[]? | select(.tag | test("^vay")) | select(.transport == "dnstt") | .transport) = "vaydns"' "$config" > "$tmp_config" 2>/dev/null; then
+                mv "$tmp_config" "$config"
+                changed=true
+                print_ok "Fixed VayDNS tunnel transport in dnstm config (dnstt → vaydns)"
+            else
+                rm -f "$tmp_config"
+            fi
+        fi
+    else
+        if jq -e '.tunnels[]? | select(.tag | test("^vay")) | select(.transport == "vaydns")' "$config" &>/dev/null; then
+            if jq '(.tunnels[]? | select(.tag | test("^vay")) | select(.transport == "vaydns") | .transport) = "dnstt"' "$config" > "$tmp_config" 2>/dev/null; then
+                mv "$tmp_config" "$config"
+                changed=true
+                print_ok "Fixed VayDNS tunnel transport in dnstm config (vaydns → dnstt for older dnstm)"
+            else
+                rm -f "$tmp_config"
+            fi
+        fi
+    fi
+}
+
+# Override a DNSTT tunnel's systemd service to use the VayDNS binary instead.
+# VayDNS supports -udp directly (unlike NoizDNS which needs PT mode) and uses
+# named flags (-domain, -upstream) instead of positional args. Adds -dnstt-compat
+# for backwards compatibility with SlipNet's built-in dnstt client.
+# Usage: create_vaydns_service_override <tag>
+create_vaydns_service_override() {
+    local tag="$1"
+    local service="dnstm-${tag}.service"
+    local dropin_dir="/etc/systemd/system/${service}.d"
+    local dropin_file="${dropin_dir}/10-vaydns-binary.conf"
+
+    local orig_exec
+    orig_exec=$(systemctl cat "$service" 2>/dev/null | grep '^ExecStart=/' | head -1 || true)
+    if [[ -z "$orig_exec" ]]; then
+        orig_exec=$(systemctl cat "$service" 2>/dev/null | grep '^ExecStart=.*dnstt-server' | tail -1 || true)
+    fi
+    if [[ -z "$orig_exec" ]]; then
+        print_fail "Could not read ExecStart from ${service}"
+        return 1
+    fi
+
+    # Extract components from original ExecStart
+    # Original: /path/dnstt-server -udp :PORT -privkey-file KEY [-mtu MTU] DOMAIN UPSTREAM
+    local tunnel_port privkey_path mtu_val domain upstream
+
+    tunnel_port=$(echo "$orig_exec" | grep -oE '\-udp[[:space:]]+[^ ]+' | grep -oE '[0-9]+$' || true)
+    if [[ -z "$tunnel_port" ]]; then
+        print_fail "Could not detect tunnel port from ${service}"
+        return 1
+    fi
+
+    privkey_path=$(echo "$orig_exec" | grep -oE '\-privkey-file\s+[^ ]+' | sed 's/-privkey-file\s*//' || true)
+    if [[ -z "$privkey_path" ]]; then
+        privkey_path="/etc/dnstm/tunnels/${tag}/server.key"
+    fi
+
+    mtu_val=$(echo "$orig_exec" | grep -oE '\-mtu\s+[0-9]+' | grep -oE '[0-9]+' || true)
+    local mtu_arg=""
+    if [[ -n "$mtu_val" ]]; then
+        mtu_arg=" -mtu ${mtu_val}"
+    fi
+
+    # Extract domain and upstream (last two positional args in dnstt)
+    local positional
+    positional=$(echo "$orig_exec" | sed 's|^ExecStart=[^ ]*||; s|-udp[[:space:]]*[^ ]*||; s|-privkey-file[[:space:]]*[^ ]*||; s|-mtu[[:space:]]*[0-9]*||' | xargs || true)
+    domain=$(echo "$positional" | awk '{print $1}')
+    upstream=$(echo "$positional" | awk '{print $2}')
+
+    if [[ -z "$domain" || -z "$upstream" ]]; then
+        print_fail "Could not parse domain/upstream from ${service}"
+        return 1
+    fi
+
+    if ! mkdir -p "$dropin_dir" 2>/dev/null; then
+        print_fail "Could not create drop-in directory: ${dropin_dir}"
+        return 1
+    fi
+
+    # VayDNS uses named flags (-domain, -upstream) + -dnstt-compat for SlipNet compatibility
+    cat > "$dropin_file" <<EOF || { print_fail "Could not write VayDNS override: ${dropin_file}"; return 1; }
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/vaydns-server -udp :${tunnel_port} -privkey-file ${privkey_path}${mtu_arg} -dnstt-compat -domain ${domain} -upstream ${upstream}
+EOF
+    print_ok "VayDNS binary override: ${service}"
+}
+
 # Main Xray backend integration function
 do_add_xray() {
     banner
@@ -4804,6 +5056,7 @@ DOMAIN=""
 SERVER_IP=""
 DNSTT_PUBKEY=""
 NOIZDNS_PUBKEY=""
+VAYDNS_PUBKEY=""
 SSH_USER=""
 SSH_PASS=""
 SOCKS_USER=""
@@ -5024,7 +5277,7 @@ cloudflare_create_dns_records() {
 
     # Step 3: Create NS records
     local ns_target="ns.${domain}"
-    local subdomains=("t" "d" "n" "s" "ds" "z")
+    local subdomains=("t" "d" "n" "v" "s" "ds" "z" "vz")
     for sub in "${subdomains[@]}"; do
         _cf_create_record "NS" "$sub" "$ns_target"
     done
@@ -5142,7 +5395,9 @@ step_dns_records() {
             "Record 4:  Type: NS  | Name: s   | Value: ns.${DOMAIN}" \
             "Record 5:  Type: NS  | Name: ds  | Value: ns.${DOMAIN}" \
             "Record 6:  Type: NS  | Name: n   | Value: ns.${DOMAIN}" \
-            "Record 7:  Type: NS  | Name: z   | Value: ns.${DOMAIN}"
+            "Record 7:  Type: NS  | Name: z   | Value: ns.${DOMAIN}" \
+            "Record 8:  Type: NS  | Name: v   | Value: ns.${DOMAIN}" \
+            "Record 9:  Type: NS  | Name: vz  | Value: ns.${DOMAIN}"
 
         echo ""
         print_warn "IMPORTANT: The A record MUST be DNS Only (grey cloud, NOT orange)"
@@ -5155,6 +5410,8 @@ step_dns_records() {
         echo "    s   = Slipstream + SSH tunnel"
         echo "    ds  = DNSTT + SSH tunnel"
         echo "    z   = NoizDNS + SSH tunnel (DPI-resistant)"
+        echo "    v   = VayDNS + SOCKS tunnel (optimized)"
+        echo "    vz  = VayDNS + SSH tunnel (optimized)"
         echo ""
 
         if ! prompt_yn "Have you created these DNS records in Cloudflare?" "n"; then
@@ -5361,6 +5618,9 @@ step_install_dnstm() {
     # Download NoizDNS server binary (DPI-resistant DNSTT fork)
     echo ""
     ensure_noizdns_binary || true
+
+    echo ""
+    ensure_vaydns_binary || true
 }
 
 # ─── STEP 6: Verify Port 53 ────────────────────────────────────────────────────
@@ -5435,6 +5695,7 @@ step_create_tunnels() {
     local any_created=false
     local _tunnel_count=4
     [[ -x /usr/local/bin/noizdns-server ]] && _tunnel_count=6
+    [[ -x /usr/local/bin/vaydns-server ]] && _tunnel_count=$((_tunnel_count + 2))
     print_info "Creating ${_tunnel_count} tunnels for domain: ${BOLD}${DOMAIN}${NC}"
     echo ""
 
@@ -5580,6 +5841,56 @@ step_create_tunnels() {
         NOIZDNS_PUBKEY=$(cat /etc/dnstm/tunnels/noiz1/server.pub 2>/dev/null || true)
     fi
 
+    # ─── VayDNS tunnels (7 & 8) ───
+    if [[ -x /usr/local/bin/vaydns-server ]]; then
+        echo ""
+        echo -e "  ${DIM}───────────────────────────────────────────────${NC}"
+        echo -e "  ${BOLD}Tunnel 7: VayDNS + SOCKS (optimized)${NC}"
+        echo ""
+        if dnstm tunnel add --transport dnstt --backend socks --domain "v.${DOMAIN}" --tag vay1 --mtu "$DNSTT_MTU" 2>&1; then
+            print_ok "Created: vay1 (VayDNS + SOCKS) on v.${DOMAIN}"
+            any_created=true
+        else
+            print_warn "Tunnel vay1 may already exist or creation failed"
+        fi
+        create_vaydns_service_override "vay1" || print_warn "Could not set VayDNS binary for vay1"
+
+        if [[ -f /etc/dnstm/tunnels/vay1/server.pub ]]; then
+            VAYDNS_PUBKEY=$(cat /etc/dnstm/tunnels/vay1/server.pub 2>/dev/null || true)
+            if [[ -n "$VAYDNS_PUBKEY" ]]; then
+                echo -e "  ${BOLD}${YELLOW}VayDNS Public Key:${NC}"
+                echo -e "  ${GREEN}${VAYDNS_PUBKEY}${NC}"
+            fi
+        fi
+        echo ""
+
+        echo -e "  ${DIM}───────────────────────────────────────────────${NC}"
+        echo -e "  ${BOLD}Tunnel 8: VayDNS + SSH (optimized)${NC}"
+        echo ""
+        if dnstm tunnel add --transport dnstt --backend ssh --domain "vz.${DOMAIN}" --tag vay-ssh --mtu "$DNSTT_MTU" 2>&1; then
+            print_ok "Created: vay-ssh (VayDNS + SSH) on vz.${DOMAIN}"
+            any_created=true
+        else
+            print_warn "Tunnel vay-ssh may already exist or creation failed"
+        fi
+        create_vaydns_service_override "vay-ssh" || print_warn "Could not set VayDNS binary for vay-ssh"
+        echo ""
+
+        # Stop VayDNS tunnels so step_start_services can start them fresh
+        systemctl stop "dnstm-vay1.service" 2>/dev/null || true
+        systemctl stop "dnstm-vay-ssh.service" 2>/dev/null || true
+
+        fix_vaydns_transport
+    else
+        echo ""
+        print_warn "VayDNS binary not available — skipping VayDNS tunnels (v, vz subdomains)"
+    fi
+
+    # Re-read VayDNS key if not captured
+    if [[ -z "$VAYDNS_PUBKEY" && -f /etc/dnstm/tunnels/vay1/server.pub ]]; then
+        VAYDNS_PUBKEY=$(cat /etc/dnstm/tunnels/vay1/server.pub 2>/dev/null || true)
+    fi
+
     if [[ "$any_created" == true ]]; then
         TUNNELS_CHANGED=true
     fi
@@ -5629,6 +5940,7 @@ step_start_services() {
     if [[ -z "$all_tags" ]]; then
         all_tags="slip1 dnstt1 slip-ssh dnstt-ssh"
         [[ -x /usr/local/bin/noizdns-server ]] && all_tags+=" noiz1 noiz-ssh"
+        [[ -x /usr/local/bin/vaydns-server ]] && all_tags+=" vay1 vay-ssh"
     fi
     for tag in $all_tags; do
         print_info "Starting tunnel: ${tag}..."
@@ -5678,6 +5990,37 @@ step_start_services() {
 
     # Fix transport field if dnstm rewrote it during start
     fix_noizdns_transport
+
+    # ── 2b. Verify VayDNS tunnels actually started ──────────────────────────────
+    for vay_tag in vay1 vay-ssh; do
+        if dnstm tunnel list 2>/dev/null | grep -q "tag=${vay_tag}"; then
+            if ! systemctl is-active --quiet "dnstm-${vay_tag}.service" 2>/dev/null; then
+                print_info "Waiting for ${vay_tag} to start..."
+                sleep 5
+                systemctl restart "dnstm-${vay_tag}.service" 2>/dev/null || true
+                sleep 3
+                if ! systemctl is-active --quiet "dnstm-${vay_tag}.service" 2>/dev/null; then
+                    print_warn "VayDNS tunnel ${vay_tag} failed to start — removing to protect DNS Router"
+                    local vay_log
+                    vay_log=$(journalctl -u "dnstm-${vay_tag}.service" -n 5 --no-pager 2>/dev/null || true)
+                    if [[ -n "$vay_log" ]]; then
+                        echo -e "  ${DIM}Last log lines:${NC}"
+                        echo "$vay_log" | while IFS= read -r l; do echo -e "  ${DIM}${l}${NC}"; done
+                    fi
+                    dnstm tunnel stop --tag "$vay_tag" 2>/dev/null || true
+                    dnstm tunnel remove --tag "$vay_tag" 2>/dev/null || true
+                    rm -f "/etc/systemd/system/dnstm-${vay_tag}.service.d/10-vaydns-binary.conf" 2>/dev/null || true
+                    rmdir "/etc/systemd/system/dnstm-${vay_tag}.service.d" 2>/dev/null || true
+                    systemctl daemon-reload 2>/dev/null || true
+                    print_info "Removed ${vay_tag} — other tunnels will work normally"
+                else
+                    print_ok "VayDNS tunnel ${vay_tag} started successfully (after retry)"
+                fi
+            fi
+        fi
+    done
+
+    fix_vaydns_transport
 
     echo ""
 
@@ -6093,6 +6436,7 @@ step_tests() {
         running_count=$(echo "$tunnel_output" | grep -ci "running" || echo "0")
         local expected_tunnels=4
         [[ -x /usr/local/bin/noizdns-server ]] && expected_tunnels=6
+        [[ -x /usr/local/bin/vaydns-server ]] && expected_tunnels=$((expected_tunnels + 2))
         if [[ "$running_count" -ge "$expected_tunnels" ]]; then
             print_ok "All tunnels running: PASS (${running_count} running)"
             pass=$((pass + 1))
@@ -6222,10 +6566,16 @@ step_summary() {
     if [[ -x /usr/local/bin/noizdns-server ]]; then
         echo -e "  NoizDNS + SOCKS:     ${GREEN}n.${DOMAIN}${NC}  ${DIM}(DPI-resistant)${NC}"
     fi
+    if [[ -x /usr/local/bin/vaydns-server ]]; then
+        echo -e "  VayDNS + SOCKS:      ${GREEN}v.${DOMAIN}${NC}  ${DIM}(optimized)${NC}"
+    fi
     echo -e "  Slipstream + SSH:    ${GREEN}s.${DOMAIN}${NC}"
     echo -e "  DNSTT + SSH:         ${GREEN}ds.${DOMAIN}${NC}"
     if [[ -x /usr/local/bin/noizdns-server ]]; then
         echo -e "  NoizDNS + SSH:       ${GREEN}z.${DOMAIN}${NC}  ${DIM}(DPI-resistant)${NC}"
+    fi
+    if [[ -x /usr/local/bin/vaydns-server ]]; then
+        echo -e "  VayDNS + SSH:        ${GREEN}vz.${DOMAIN}${NC}  ${DIM}(optimized)${NC}"
     fi
     echo ""
 
@@ -6257,18 +6607,32 @@ step_summary() {
         echo ""
     fi
 
+    if [[ -n "$VAYDNS_PUBKEY" ]]; then
+        echo -e "  ${BOLD}VayDNS Public Keys${NC}"
+        echo -e "  ${DIM}────────────────────────────────────────${NC}"
+        echo -e "  ${GREEN}vay1 (SOCKS):${NC}    ${VAYDNS_PUBKEY}"
+        local _vay_ssh_pk=""
+        if [[ -f /etc/dnstm/tunnels/vay-ssh/server.pub ]]; then
+            _vay_ssh_pk=$(cat /etc/dnstm/tunnels/vay-ssh/server.pub 2>/dev/null || true)
+        fi
+        if [[ -n "$_vay_ssh_pk" ]]; then
+            echo -e "  ${GREEN}vay-ssh (SSH):${NC}   ${_vay_ssh_pk}"
+        fi
+        echo ""
+    fi
+
     # Generate share URLs (dnst:// for dnstc CLI)
     echo -e "  ${BOLD}Share URLs — dnst:// (for dnstc CLI)${NC}"
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
     local share_url
-    for tag in slip1 dnstt1 noiz1; do
+    for tag in slip1 dnstt1 noiz1 vay1; do
         share_url=$(dnstm tunnel share -t "$tag" 2>/dev/null || true)
         if [[ -n "$share_url" ]]; then
             echo -e "  ${GREEN}${tag}:${NC} ${share_url}"
         fi
     done
     if [[ "$SSH_SETUP_DONE" == true && -n "$SSH_USER" && -n "$SSH_PASS" ]]; then
-        for tag in slip-ssh dnstt-ssh noiz-ssh; do
+        for tag in slip-ssh dnstt-ssh noiz-ssh vay-ssh; do
             share_url=$(dnstm tunnel share -t "$tag" --user "$SSH_USER" --password "$SSH_PASS" 2>/dev/null || true)
             if [[ -n "$share_url" ]]; then
                 echo -e "  ${GREEN}${tag}:${NC} ${share_url}"
@@ -6301,6 +6665,11 @@ step_summary() {
         slipnet_url=$(generate_slipnet_url "sayedns" "n" "$NOIZDNS_PUBKEY" "" "" "$s_user" "$s_pass")
         echo -e "  ${GREEN}noiz1:${NC}     ${slipnet_url}"
     fi
+    # VayDNS + SOCKS
+    if [[ -n "$VAYDNS_PUBKEY" ]]; then
+        slipnet_url=$(generate_slipnet_url "dnstt" "v" "$VAYDNS_PUBKEY" "" "" "$s_user" "$s_pass")
+        echo -e "  ${GREEN}vay1:${NC}      ${slipnet_url}"
+    fi
     # SSH tunnels
     if [[ "$SSH_SETUP_DONE" == true && -n "$SSH_USER" && -n "$SSH_PASS" ]]; then
         local _any_pk=""
@@ -6324,6 +6693,15 @@ step_summary() {
         if [[ -n "$noiz_ssh_pubkey" ]]; then
             slipnet_url=$(generate_slipnet_url "sayedns_ssh" "z" "$noiz_ssh_pubkey" "$SSH_USER" "$SSH_PASS" "$s_user" "$s_pass")
             echo -e "  ${GREEN}noiz-ssh:${NC}  ${slipnet_url}"
+        fi
+        # VayDNS + SSH
+        local vay_ssh_pubkey=""
+        if [[ -f /etc/dnstm/tunnels/vay-ssh/server.pub ]]; then
+            vay_ssh_pubkey=$(cat /etc/dnstm/tunnels/vay-ssh/server.pub 2>/dev/null || true)
+        fi
+        if [[ -n "$vay_ssh_pubkey" ]]; then
+            slipnet_url=$(generate_slipnet_url "dnstt_ssh" "vz" "$vay_ssh_pubkey" "$SSH_USER" "$SSH_PASS" "$s_user" "$s_pass")
+            echo -e "  ${GREEN}vay-ssh:${NC}   ${slipnet_url}"
         fi
     fi
     echo ""
@@ -6567,7 +6945,9 @@ do_add_domain() {
             "Record 4:  Type: NS  | Name: s   | Value: ns.${DOMAIN}" \
             "Record 5:  Type: NS  | Name: ds  | Value: ns.${DOMAIN}" \
             "Record 6:  Type: NS  | Name: n   | Value: ns.${DOMAIN}" \
-            "Record 7:  Type: NS  | Name: z   | Value: ns.${DOMAIN}"
+            "Record 7:  Type: NS  | Name: z   | Value: ns.${DOMAIN}" \
+            "Record 8:  Type: NS  | Name: v   | Value: ns.${DOMAIN}" \
+            "Record 9:  Type: NS  | Name: vz  | Value: ns.${DOMAIN}"
 
         echo ""
         print_warn "IMPORTANT: The A record MUST be DNS Only (grey cloud, NOT orange)"
@@ -6826,10 +7206,16 @@ do_add_domain() {
     if [[ -n "${noiz_tag:-}" ]]; then
         echo -e "  NoizDNS + SOCKS:     ${GREEN}n.${DOMAIN}${NC}  (${noiz_tag})  ${DIM}(DPI-resistant)${NC}"
     fi
+    if [[ -n "${vay_tag:-}" ]]; then
+        echo -e "  VayDNS + SOCKS:      ${GREEN}v.${DOMAIN}${NC}  (${vay_tag})  ${DIM}(optimized)${NC}"
+    fi
     echo -e "  Slipstream + SSH:    ${GREEN}s.${DOMAIN}${NC}  (${slip_ssh_tag})"
     echo -e "  DNSTT + SSH:         ${GREEN}ds.${DOMAIN}${NC}  (${dnstt_ssh_tag})"
     if [[ -n "${noiz_ssh_tag:-}" ]]; then
         echo -e "  NoizDNS + SSH:       ${GREEN}z.${DOMAIN}${NC}  (${noiz_ssh_tag})  ${DIM}(DPI-resistant)${NC}"
+    fi
+    if [[ -n "${vay_ssh_tag:-}" ]]; then
+        echo -e "  VayDNS + SSH:        ${GREEN}vz.${DOMAIN}${NC}  (${vay_ssh_tag})  ${DIM}(optimized)${NC}"
     fi
     echo ""
 
@@ -6861,12 +7247,27 @@ do_add_domain() {
         echo ""
     fi
 
+    if [[ -n "${VAYDNS_PUBKEY:-}" ]]; then
+        echo -e "  ${BOLD}VayDNS Public Keys${NC}"
+        echo -e "  ${DIM}────────────────────────────────────────${NC}"
+        echo -e "  ${GREEN}${vay_tag} (SOCKS):${NC}    ${VAYDNS_PUBKEY}"
+        local _vay_ssh_pk=""
+        if [[ -n "${vay_ssh_tag:-}" && -f "/etc/dnstm/tunnels/${vay_ssh_tag}/server.pub" ]]; then
+            _vay_ssh_pk=$(cat "/etc/dnstm/tunnels/${vay_ssh_tag}/server.pub" 2>/dev/null || true)
+        fi
+        if [[ -n "$_vay_ssh_pk" ]]; then
+            echo -e "  ${GREEN}${vay_ssh_tag} (SSH):${NC}   ${_vay_ssh_pk}"
+        fi
+        echo ""
+    fi
+
     # Generate share URLs for new tunnels (dnst:// for dnstc CLI)
     echo -e "  ${BOLD}Share URLs — dnst:// (for dnstc CLI)${NC}"
     echo -e "  ${DIM}────────────────────────────────────────${NC}"
     local share_url
     local _socks_tags="$slip_tag $dnstt_tag"
     [[ -n "${noiz_tag:-}" ]] && _socks_tags+=" $noiz_tag"
+    [[ -n "${vay_tag:-}" ]] && _socks_tags+=" $vay_tag"
     for tag in $_socks_tags; do
         share_url=$(dnstm tunnel share -t "$tag" 2>/dev/null || true)
         if [[ -n "$share_url" ]]; then
@@ -6879,6 +7280,9 @@ do_add_domain() {
     echo -e "  ${DIM}  dnstm tunnel share -t ${dnstt_ssh_tag} --user <username> --password <pass>${NC}"
     if [[ -n "${noiz_ssh_tag:-}" ]]; then
         echo -e "  ${DIM}  dnstm tunnel share -t ${noiz_ssh_tag} --user <username> --password <pass>${NC}"
+    fi
+    if [[ -n "${vay_ssh_tag:-}" ]]; then
+        echo -e "  ${DIM}  dnstm tunnel share -t ${vay_ssh_tag} --user <username> --password <pass>${NC}"
     fi
     echo ""
 
@@ -6902,6 +7306,10 @@ do_add_domain() {
     if [[ -n "${NOIZDNS_PUBKEY:-}" ]]; then
         slipnet_url=$(generate_slipnet_url "sayedns" "n" "$NOIZDNS_PUBKEY" "" "" "$s_user" "$s_pass")
         echo -e "  ${GREEN}${noiz_tag}:${NC}      ${slipnet_url}"
+    fi
+    if [[ -n "${VAYDNS_PUBKEY:-}" ]]; then
+        slipnet_url=$(generate_slipnet_url "dnstt" "v" "$VAYDNS_PUBKEY" "" "" "$s_user" "$s_pass")
+        echo -e "  ${GREEN}${vay_tag}:${NC}       ${slipnet_url}"
     fi
 
     # Ask user for SSH credentials to generate SSH tunnel URLs
@@ -6934,6 +7342,16 @@ do_add_domain() {
                 if [[ -n "$_noiz_ssh_pk2" ]]; then
                     slipnet_url=$(generate_slipnet_url "sayedns_ssh" "z" "$_noiz_ssh_pk2" "$ssh_tun_user" "$ssh_tun_pass" "$s_user" "$s_pass")
                     echo -e "  ${GREEN}${noiz_ssh_tag}:${NC} ${slipnet_url}"
+                fi
+            fi
+            if [[ -n "${VAYDNS_PUBKEY:-}" && -n "${vay_ssh_tag:-}" ]]; then
+                local _vay_ssh_pk2=""
+                if [[ -f "/etc/dnstm/tunnels/${vay_ssh_tag}/server.pub" ]]; then
+                    _vay_ssh_pk2=$(cat "/etc/dnstm/tunnels/${vay_ssh_tag}/server.pub" 2>/dev/null || true)
+                fi
+                if [[ -n "$_vay_ssh_pk2" ]]; then
+                    slipnet_url=$(generate_slipnet_url "dnstt_ssh" "vz" "$_vay_ssh_pk2" "$ssh_tun_user" "$ssh_tun_pass" "$s_user" "$s_pass")
+                    echo -e "  ${GREEN}${vay_ssh_tag}:${NC} ${slipnet_url}"
                 fi
             fi
         else
