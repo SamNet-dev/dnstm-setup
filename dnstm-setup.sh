@@ -4474,12 +4474,9 @@ ensure_vaydns_binary() {
     arch=$(detect_architecture)
 
     local vaydns_downloaded=false
-    local vaydns_own_url="https://github.com/SamNet-dev/dnstm-setup/releases/download/vaydns-v1.0/vaydns-server-linux-${arch}"
     local vaydns_release_url="https://github.com/net2share/vaydns/releases/latest/download/vaydns-server-linux-${arch}"
 
-    if curl -fSL --progress-bar --connect-timeout 10 --max-time 60 -o /usr/local/bin/vaydns-server "$vaydns_own_url" 2>/dev/null; then
-        vaydns_downloaded=true
-    elif curl -fSL --progress-bar --connect-timeout 10 --max-time 60 -o /usr/local/bin/vaydns-server "$vaydns_release_url" 2>/dev/null; then
+    if curl -fSL --progress-bar --connect-timeout 10 --max-time 60 -o /usr/local/bin/vaydns-server "$vaydns_release_url" 2>/dev/null; then
         vaydns_downloaded=true
     fi
 
