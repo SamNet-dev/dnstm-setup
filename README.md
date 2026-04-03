@@ -39,15 +39,6 @@ Deploys [dnstm](https://github.com/net2share/dnstm) DNS tunnel servers with **Sl
 
 ### ⚡ VayDNS Tunnels (Optimized)
 
-Two new tunnel types added to the main setup — **NoizDNS + SOCKS** (`n` subdomain) and **NoizDNS + SSH** (`z` subdomain). NoizDNS is a [DPI-resistant fork of DNSTT](https://github.com/anonvector/noizdns-deploy) by anonvector (same author as SlipNet) that uses alternative DNS query encoding to evade Deep Packet Inspection. The server auto-detects both standard DNSTT and NoizDNS clients, so existing setups keep working.
-
-- **6 tunnels** instead of 4 (Slipstream + DNSTT + NoizDNS, each with SOCKS and SSH backends)
-- **Zero extra configuration** — NoizDNS binary is downloaded automatically during setup
-- **Graceful degradation** — if the download fails, the script creates the standard 4 tunnels and continues
-- **In SlipNet**, select **NoizDNS** as the tunnel type for `n` and `z` subdomains
-
-### ⚡ VayDNS Tunnels (Optimized)
-
 Two new tunnel types — **VayDNS + SOCKS** (`v` subdomain) and **VayDNS + SSH** (`vz` subdomain). [VayDNS](https://github.com/net2share/vaydns) is an optimized fork of DNSTT by net2share with KCP/smux sessions, auto-recovery, and a leaner wire protocol. Runs in `-dnstt-compat` mode for backwards compatibility with existing SlipNet clients.
 
 - **Up to 8 tunnels** (Slipstream + DNSTT + NoizDNS + VayDNS, each with SOCKS and SSH)
