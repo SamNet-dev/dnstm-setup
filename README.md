@@ -28,6 +28,7 @@ Deploys [dnstm](https://github.com/net2share/dnstm) DNS tunnel servers with **Sl
 - [🔧 Troubleshooting](#-troubleshooting)
 - [🙏 Acknowledgments](#-acknowledgments)
 - [🔗 Related Projects](#-related-projects)
+- [📖 Documentation & Guides](#-documentation--guides)
 - [💖 Donate](#-donate)
 - [📄 License](#-license)
 - [👤 Author](#-author)
@@ -988,6 +989,23 @@ Thank you to **David Fifield** and **EndPositive** for making internet freedom p
 
 ---
 
+## 📖 Documentation & Guides
+
+For detailed tutorials and related tools, visit SamNet:
+
+- **[Complete DNS Tunneling Guide](https://www.samnet.dev/learn/guides/dns-tunneling-guide/)** — Full walkthrough: how DNS tunneling works, all 8 tunnel types, setup, client configuration, Xray integration, and troubleshooting
+- **[Every Way to Bypass Internet Censorship](https://www.samnet.dev/learn/guides/bypass-internet-censorship/)** — DNS tunneling compared to VPN, Tor, VLESS+Reality, and other methods
+- **[Complete DNS Guide](https://www.samnet.dev/learn/guides/complete-dns-guide/)** — How DNS works, record types, caching, security, and DNS tunneling explained
+- **[Fortify — Server Security Hardener](https://www.samnet.dev/learn/guides/fortify-server-hardening/)** — Harden your DNS tunnel server after setup
+- **[3X-UI Panel Setup](https://www.samnet.dev/learn/networking/xui-setup/)** — Set up the Xray backend for DNS tunnel integration
+- **[Cloudflare Setup Guide](https://www.samnet.dev/learn/networking/cloudflare-setup/)** — DNS record management for your tunnel domain
+- **[Server Hardening Guide](https://www.samnet.dev/learn/security/server-hardening/)** — Secure your VPS
+- **[VPN Leak Test](https://www.samnet.dev/tools/vpn-leak-test/)** — Verify your tunnel is hiding your IP
+- **[DNS Toolbox](https://www.samnet.dev/tools/dns-toolbox/)** — Check your NS records are set correctly
+- **[Port Scanner](https://www.samnet.dev/tools/port-scanner/)** — Verify port 53 is open
+
+---
+
 ## 💖 Donate
 
 If this project helps you or someone you know access the free internet, consider supporting continued development:
@@ -1431,6 +1449,18 @@ systemctl enable systemd-resolved && systemctl start systemd-resolved
 اگر ترجیح می‌دهید مراحل را به صورت دستی (بدون این اسکریپت) انجام دهید:
 
 📝 **[راهنمای کامل راه‌اندازی تانل DNS](https://telegra.ph/Complete-Guide-to-Setting-Up-a-DNS-Tunnel-03-04)**
+
+---
+
+## 📖 مستندات و راهنماها
+
+برای آموزش‌های مرحله به مرحله و ابزارهای مرتبط:
+
+- **[راهنمای کامل تانل DNS](https://www.samnet.dev/learn/guides/dns-tunneling-guide/)** — آموزش کامل: نحوه کار تانل DNS، همه ۸ نوع تانل، نصب و عیب‌یابی
+- **[همه روش‌های دور زدن سانسور](https://www.samnet.dev/learn/guides/bypass-internet-censorship/)** — مقایسه تانل DNS با VPN، Tor، VLESS+Reality و روش‌های دیگر
+- **[آموزش پنل 3X-UI](https://www.samnet.dev/learn/networking/xui-setup/?lang=fa)** — تنظیم بک‌اند Xray برای یکپارچگی با تانل DNS
+- **[تست نشتی VPN](https://www.samnet.dev/tools/vpn-leak-test/)** — بررسی مخفی بودن آی‌پی واقعی
+- **[DNS Toolbox](https://www.samnet.dev/tools/dns-toolbox/)** — بررسی صحت رکوردهای NS
 
 ---
 
